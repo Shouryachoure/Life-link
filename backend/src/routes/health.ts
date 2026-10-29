@@ -61,39 +61,95 @@ router.post('/analyze-report', authenticate, async (req: AuthRequest, res) => {
   try {
     const text = textContent.toLowerCase();
     
-    // Parse key clinical metrics using clinical regex rules
-    let pulse = 72;
-    let systolic = 120;
-    let diastolic = 80;
-    let glucose = 95;
-    let weight = 70;
+    // Parse key clinical metrics using clinical regex scanners with physiological boundary checks
+    const metricsToCreate: { patientId: string; metricType: string; value: number; unit: string }[] = [];
+    const findings: { name: string; value: string; unit: string; status: string }[] = [];
 
-    // Regex scanners
-    const pulseMatch = text.match(/(?:pulse|heart\s*rate|hr)[:\s]*(\d+)/i);
-    if (pulseMatch) pulse = parseInt(pulseMatch[1]);
-
-    const bpMatch = text.match(/(?:bp|blood\s*pressure)[:\s]*(\d+)\s*\/\s*(\d+)/i);
-    if (bpMatch) {
-      systolic = parseInt(bpMatch[1]);
-      diastolic = parseInt(bpMatch[2]);
+    // 1. Pulse
+    const pulseMatch = text.match(/(?:pulse|heart\s*rate|hr)[:\s]*(\d{2,3})/i);
+    let pulse: number | null = null;
+    if (pulseMatch) {
+      const parsed = parseInt(pulseMatch[1], 10);
+      if (parsed >= 30 && parsed <= 250) {
+        pulse = parsed;
+        metricsToCreate.push({ patientId: req.user.id, metricType: 'pulse', value: pulse, unit: 'bpm' });
+        findings.push({
+          name: 'Heart Rate (Pulse)',
+          value: `${pulse}`,
+          unit: 'bpm',
+          status: pulse > 100 ? 'Elevated' : pulse < 60 ? 'Low' : 'Normal',
+        });
+      }
     }
 
-    const glucoseMatch = text.match(/(?:glucose|sugar|bs|fbs)[:\s]*(\d+)/i);
-    if (glucoseMatch) glucose = parseInt(glucoseMatch[1]);
+    // 2. Blood Pressure
+    const bpMatch = text.match(/(?:bp|blood\s*pressure)[:\s]*(\d{2,3})\s*\/\s*(\d{2,3})/i);
+    let systolic: number | null = null;
+    let diastolic: number | null = null;
+    if (bpMatch) {
+      const s = parseInt(bpMatch[1], 10);
+      const d = parseInt(bpMatch[2], 10);
+      if (s >= 50 && s <= 300 && d >= 30 && d <= 200 && s > d) {
+        systolic = s;
+        diastolic = d;
+        metricsToCreate.push({ patientId: req.user.id, metricType: 'bp_systolic', value: systolic, unit: 'mmHg' });
+        metricsToCreate.push({ patientId: req.user.id, metricType: 'bp_diastolic', value: diastolic, unit: 'mmHg' });
+        findings.push({
+          name: 'Systolic Blood Pressure',
+          value: `${systolic}`,
+          unit: 'mmHg',
+          status: systolic > 130 ? 'Elevated' : systolic < 90 ? 'Low' : 'Normal',
+        });
+        findings.push({
+          name: 'Diastolic Blood Pressure',
+          value: `${diastolic}`,
+          unit: 'mmHg',
+          status: diastolic > 85 ? 'Elevated' : 'Normal',
+        });
+      }
+    }
 
-    const weightMatch = text.match(/(?:weight|wt)[:\s]*(\d+)/i);
-    if (weightMatch) weight = parseInt(weightMatch[1]);
+    // 3. Blood Glucose
+    const glucoseMatch = text.match(/(?:glucose|sugar|bs|fbs|rbs)[:\s]*(\d{2,3})/i);
+    let glucose: number | null = null;
+    if (glucoseMatch) {
+      const g = parseInt(glucoseMatch[1], 10);
+      if (g >= 20 && g <= 800) {
+        glucose = g;
+        metricsToCreate.push({ patientId: req.user.id, metricType: 'blood_glucose', value: glucose, unit: 'mg/dL' });
+        findings.push({
+          name: 'Blood Glucose',
+          value: `${glucose}`,
+          unit: 'mg/dL',
+          status: glucose > 140 ? 'Elevated' : glucose < 70 ? 'Low' : 'Normal',
+        });
+      }
+    }
 
-    // Save parsed metrics into the DB
-    const metricsToCreate = [
-      { patientId: req.user.id, metricType: 'pulse', value: pulse, unit: 'bpm' },
-      { patientId: req.user.id, metricType: 'bp_systolic', value: systolic, unit: 'mmHg' },
-      { patientId: req.user.id, metricType: 'bp_diastolic', value: diastolic, unit: 'mmHg' },
-      { patientId: req.user.id, metricType: 'blood_glucose', value: glucose, unit: 'mg/dL' },
-      { patientId: req.user.id, metricType: 'weight', value: weight, unit: 'kg' },
-    ];
+    // 4. Weight
+    const weightMatch = text.match(/(?:weight|wt)[:\s]*(\d{2,3}(?:\.\d+)?)\s*(?:kg|kilos)?/i);
+    if (weightMatch) {
+      const w = parseFloat(weightMatch[1]);
+      if (w >= 2 && w <= 500) {
+        metricsToCreate.push({ patientId: req.user.id, metricType: 'weight', value: w, unit: 'kg' });
+        findings.push({
+          name: 'Body Weight',
+          value: `${w}`,
+          unit: 'kg',
+          status: 'Normal',
+        });
+      }
+    }
 
-    // Create metrics transactionally
+    // If zero clinical vitals were found, do not fabricate measurements or insert mock values
+    if (metricsToCreate.length === 0) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'No valid clinical vital signs (pulse, blood pressure, glucose, or weight) could be extracted from the provided text.',
+      });
+    }
+
+    // Save only genuine parsed metrics into the DB transactionally
     await prisma.$transaction(
       metricsToCreate.map((m) =>
         prisma.healthMetric.create({
@@ -102,37 +158,33 @@ router.post('/analyze-report', authenticate, async (req: AuthRequest, res) => {
       )
     );
 
-    // AI Summary response parameters matching health-q
-    let summary = 'Medical report analysis complete. Standard cardiovascular and glucose metrics extracted.';
-    let priority = 'Medium';
-    let recommendation = 'Please consult your practitioner to verify these parsed values.';
-    
-    if (systolic > 140 || diastolic > 90 || pulse > 100 || glucose > 140) {
+    // AI Summary response parameters matching health findings
+    let priority = 'Low';
+    let summary = 'Medical report analysis complete. Genuine physiological metrics extracted.';
+    let recommendation = 'Maintain regular monitoring and healthy habits.';
+
+    const isHighBP = systolic !== null && systolic > 140;
+    const isHighPulse = pulse !== null && pulse > 100;
+    const isHighGlucose = glucose !== null && glucose > 140;
+    const isLowBP = systolic !== null && systolic < 90;
+    const isLowGlucose = glucose !== null && glucose < 70;
+
+    if (isHighBP || isHighPulse || isHighGlucose) {
       priority = 'High';
-      summary = 'Caution: Elevated blood pressure or heart rate metrics detected. Review advised.';
-      recommendation = 'Schedule a follow-up appointment with a Cardiologist soon.';
-    } else if (systolic < 90 || glucose < 70) {
+      summary = 'Caution: Elevated clinical metrics detected in submitted report.';
+      recommendation = 'Schedule a follow-up appointment with your physician or cardiologist.';
+    } else if (isLowBP || isLowGlucose) {
       priority = 'High';
-      summary = 'Caution: Low blood pressure or low blood glucose readings parsed. Monitor levels.';
-      recommendation = 'Discuss these values with your Primary Care Physician.';
-    } else {
-      priority = 'Low';
-      summary = 'Metrics are within optimal clinical baseline ranges. Continue regular monitoring.';
-      recommendation = 'Maintain your current diet and lifestyle checklist.';
+      summary = 'Caution: Low blood pressure or blood glucose readings detected.';
+      recommendation = 'Discuss these readings with your primary healthcare provider promptly.';
     }
 
     return res.json({
       summary,
       priority,
-      keyFindings: [
-        { name: 'Heart Rate (Pulse)', value: `${pulse}`, unit: 'bpm', status: pulse > 100 || pulse < 60 ? 'Abnormal' : 'Normal' },
-        { name: 'Systolic Blood Pressure', value: `${systolic}`, unit: 'mmHg', status: systolic > 130 ? 'Elevated' : 'Normal' },
-        { name: 'Diastolic Blood Pressure', value: `${diastolic}`, unit: 'mmHg', status: diastolic > 85 ? 'Elevated' : 'Normal' },
-        { name: 'Blood Glucose', value: `${glucose}`, unit: 'mg/dL', status: glucose > 125 ? 'High' : 'Normal' },
-        { name: 'Body Weight', value: `${weight}`, unit: 'kg', status: 'Normal' },
-      ],
+      keyFindings: findings,
       recommendation,
-      disclaimer: 'AI-generated analysis. Always verify clinical findings with a qualified doctor.',
+      disclaimer: 'Clinical parsing tool. Always verify values with a licensed healthcare practitioner.',
     });
   } catch (error: any) {
     return res.status(500).json({ message: error.message || 'Internal server error' });

@@ -1,527 +1,574 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Activity, Truck, User, ArrowRight, Lock, Mail, Heart, Phone, ShieldAlert } from 'lucide-react';
+import {
+  Mail,
+  Lock,
+  Eye,
+  EyeOff,
+  ShieldAlert,
+  ArrowRight,
+  AlertCircle,
+  Building,
+  User,
+  Truck,
+  KeyRound,
+  Smartphone,
+  ShieldCheck,
+  CheckCircle2,
+} from 'lucide-react';
 import { ThemeToggle } from '../components/ui/ThemeToggle';
 import { HeartbeatLoader } from '../components/ui/HeartbeatLoader';
+import { OtpScreen } from '../components/auth/OtpScreen';
+import { supabase, isSupabaseConfigured } from '../utils/supabaseClient';
+
+function maskEmailAddress(emailStr: string): string {
+  const parts = emailStr.split('@');
+  if (parts.length !== 2) return emailStr;
+  const name = parts[0];
+  const domain = parts[1];
+  const visible = name.slice(0, 2);
+  return `${visible}***@${domain}`;
+}
 
 export const Login: React.FC = () => {
-  const { user, login, apiFetch } = useAuth();
+  const { user, login, apiFetch, syncSupabaseSession } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
-  // Auto-redirect if session is active
+  // Intended destination preserved from ProtectedRoute
+  const destination = (location.state as any)?.from?.pathname;
+
+  const getRedirectForRole = (role: string) => {
+    if (destination && destination !== '/login' && destination !== '/unauthorized') {
+      return destination;
+    }
+    if (role === 'PATIENT') return '/patient';
+    if (role === 'DRIVER') return '/driver';
+    if (role === 'ADMIN_HOSPITAL') return '/hospital';
+    if (role === 'OPERATOR_ADMIN') return '/operator';
+    if (role === 'SUPER_ADMIN') return '/super-admin';
+    return '/';
+  };
+
+  // Auto-redirect if already authenticated
   useEffect(() => {
     if (user) {
-      if (user.role === 'PATIENT') navigate('/patient');
-      else if (user.role === 'DRIVER') navigate('/driver');
-      else if (user.role === 'ADMIN_HOSPITAL') navigate('/hospital');
-      else if (user.role === 'SUPER_ADMIN') navigate('/super-admin');
+      navigate(getRedirectForRole(user.role), { replace: true });
     }
   }, [user, navigate]);
 
-  const [activeTab, setActiveTab] = useState<'PATIENT' | 'DRIVER'>('PATIENT');
-  const [email, setEmail] = useState('');
+  // Auth Mode: 'PASSWORD' vs 'OTP'
+  const [authMode, setAuthMode] = useState<'PASSWORD' | 'OTP'>('PASSWORD');
+
+  // Password Sign-in state
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+
+  // OTP Sign-in state
+  const [otpStage, setOtpStage] = useState<'INPUT' | 'VERIFY'>('INPUT');
+  const [otpChannel, setOtpChannel] = useState<'EMAIL' | 'PHONE'>('EMAIL');
+  const [maskedRecipient, setMaskedRecipient] = useState('');
+  const [otpTargetIdentifier, setOtpTargetIdentifier] = useState('');
+  const [providerConfigured, setProviderConfigured] = useState(false);
+  const [deliveryFeedback, setDeliveryFeedback] = useState('');
+  const [mockCode, setMockCode] = useState<string | undefined>();
+  const [remainingAttempts, setRemainingAttempts] = useState<number | undefined>();
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Google OAuth state
-  const [googleCredential, setGoogleCredential] = useState<string | null>(null);
-  const [showGoogleSetup, setShowGoogleSetup] = useState(false);
-  const [googleSetupRole, setGoogleSetupRole] = useState<'PATIENT' | 'DRIVER'>('PATIENT');
-  const [googleSetupPhone, setGoogleSetupPhone] = useState('');
-  
-  // Google Patient Profile state
-  const [googleSetupBlood, setGoogleSetupBlood] = useState('O+');
-  const [googleSetupAllergies, setGoogleSetupAllergies] = useState('');
-  const [googleSetupContactName, setGoogleSetupContactName] = useState('');
-  const [googleSetupContactPhone, setGoogleSetupContactPhone] = useState('');
-  const [googleSetupNotes, setGoogleSetupNotes] = useState('');
-  
-  // Google Driver Vehicle state
-  const [googleSetupVehicle, setGoogleSetupVehicle] = useState('');
-  const [googleSetupAmbType, setGoogleSetupAmbType] = useState('BASIC_LIFE_SUPPORT');
-
-  const handleLogin = async (e: React.FormEvent) => {
+  // 1. Password Login
+  const handlePasswordLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (!identifier.trim() || !password) {
+      setError('Email or phone and password are required.');
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const data = await apiFetch('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-      });
+      const isEmail = identifier.includes('@');
+      const payload = isEmail
+        ? { email: identifier.trim().toLowerCase(), password }
+        : { phone: identifier.trim(), password };
 
-      login(data.token, data.user);
-      if (data.user.role === 'PATIENT') navigate('/patient');
-      else navigate('/driver');
-    } catch (err: any) {
-      setError(err.message || 'Login failed. Check your credentials.');
-    } finally {
-      setLoading(false);
-    }
-  };
+      // Try local LifeLink login first
+      try {
+        const data = await apiFetch('/auth/login', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
 
-  // Google GSI Handler
-  const handleGoogleCredentialResponse = async (response: any) => {
-    const idToken = response.credential;
-    setGoogleCredential(idToken);
-    setError('');
-
-    try {
-      setLoading(true);
-      const data = await apiFetch('/auth/google', {
-        method: 'POST',
-        body: JSON.stringify({ credential: idToken, role: activeTab }),
-      });
-
-      if (data.isNewUser) {
-        setGoogleSetupRole(activeTab);
-        setShowGoogleSetup(true);
-      } else {
         login(data.token, data.user);
-        if (data.user.role === 'PATIENT') navigate('/patient');
-        else navigate('/driver');
+        navigate(getRedirectForRole(data.user.role), { replace: true });
+        return;
+      } catch (localErr: any) {
+        // If local login fails and user supplied email, attempt Supabase Auth password sign-in
+        if (isEmail && isSupabaseConfigured() && supabase) {
+          const { data: sbData, error: sbError } = await supabase.auth.signInWithPassword({
+            email: identifier.trim().toLowerCase(),
+            password,
+          });
+
+          if (!sbError && sbData?.session?.access_token) {
+            const syncedUser = await syncSupabaseSession(sbData.session.access_token);
+            navigate(getRedirectForRole(syncedUser.role), { replace: true });
+            return;
+          }
+        }
+        throw localErr;
       }
     } catch (err: any) {
-      setError(err.message || 'Google authentication failed.');
+      setError(err.message || 'Invalid email or password. Please check your credentials.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Initialize Google Identity Services script
-  useEffect(() => {
-    const google = (window as any).google;
-    if (google?.accounts?.id) {
-      google.accounts.id.initialize({
-        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || '35123456789-mockclientid.apps.googleusercontent.com',
-        callback: handleGoogleCredentialResponse,
-      });
-
-      google.accounts.id.renderButton(
-        document.getElementById('google-signin-button'),
-        { theme: 'outline', size: 'large', width: 380 }
-      );
-    }
-  }, [activeTab]);
-
-  const handleFinalizeGoogleSetup = async (e: React.FormEvent) => {
+  // 2. Initiate OTP Login
+  const handleRequestLoginOtp = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setError('');
+
+    if (!identifier.trim()) {
+      setError('Please provide your registered email address or mobile number.');
+      return;
+    }
+
     setLoading(true);
+    const isEmail = identifier.includes('@');
+    const channel = isEmail ? 'EMAIL' : 'PHONE';
 
-    const payload: any = {
-      credential: googleCredential,
-      role: googleSetupRole,
-      phone: googleSetupPhone,
-    };
+    // Passwordless Email OTP Login with Supabase
+    if (isEmail && isSupabaseConfigured() && supabase) {
+      try {
+        const redirectUrl = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined;
+        const { error: otpError } = await supabase.auth.signInWithOtp({
+          email: identifier.trim().toLowerCase(),
+          options: {
+            shouldCreateUser: false, // Prevents unintended account creation during login
+            emailRedirectTo: redirectUrl,
+          },
+        });
 
-    if (googleSetupRole === 'PATIENT') {
-      payload.bloodGroup = googleSetupBlood;
-      payload.allergies = googleSetupAllergies;
-      payload.emergencyContactName = googleSetupContactName;
-      payload.emergencyContactPhone = googleSetupContactPhone;
-      payload.medicalNotes = googleSetupNotes;
-    } else {
-      payload.vehicleNumber = googleSetupVehicle;
-      payload.ambulanceType = googleSetupAmbType;
+        if (otpError) {
+          const rawMsg = otpError.message.toLowerCase();
+          if (rawMsg.includes('signups not allowed') || rawMsg.includes('not found') || rawMsg.includes('user')) {
+            setError('No account found for this email address. Please register first.');
+          } else if (rawMsg.includes('rate limit')) {
+            setError('Too many login attempts. Please wait a minute before requesting another code.');
+          } else {
+            setError(otpError.message);
+          }
+          setLoading(false);
+          return;
+        }
+
+        setOtpChannel('EMAIL');
+        setOtpTargetIdentifier(identifier.trim().toLowerCase());
+        setMaskedRecipient(maskEmailAddress(identifier.trim()));
+        setProviderConfigured(true);
+        setDeliveryFeedback('Enter the 6-digit login code sent to your email. You do NOT need to click any link in the email.');
+        setOtpStage('VERIFY');
+        setLoading(false);
+        return;
+      } catch (err: any) {
+        setError(err.message || 'Failed to dispatch login code.');
+        setLoading(false);
+        return;
+      }
     }
 
     try {
-      const data = await apiFetch('/auth/google', {
+      const data = await apiFetch('/auth/otp/send', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          identifier: identifier.trim(),
+          channel,
+          purpose: 'LOGIN',
+        }),
       });
 
-      setShowGoogleSetup(false);
-      login(data.token, data.user);
-      if (data.user.role === 'PATIENT') navigate('/patient');
-      else navigate('/driver');
+      setOtpChannel(data.channel || channel);
+      setOtpTargetIdentifier(data.identifier || identifier.trim());
+      setMaskedRecipient(data.maskedRecipient || identifier);
+      setProviderConfigured(Boolean(data.providerConfigured));
+      setDeliveryFeedback(data.deliveryFeedback || '');
+      setMockCode(data.mockCode);
+      setOtpStage('VERIFY');
     } catch (err: any) {
-      setError(err.message || 'Failed to complete registration.');
+      setError(err.message || 'Failed to dispatch login code.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Mock Developer Quick Login
-  const handleMockGoogleLogin = () => {
-    if (activeTab === 'PATIENT') {
-      setEmail('patient.john@gmail.com');
-      setPassword('password123');
-    } else {
-      setEmail('driver.mike@lifelink.com');
-      setPassword('password123');
+  // 3. Resend Login OTP
+  const handleResendLoginOtp = async () => {
+    if (otpChannel === 'EMAIL' && isSupabaseConfigured() && supabase) {
+      try {
+        const redirectUrl = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined;
+        const { error: resendError } = await supabase.auth.signInWithOtp({
+          email: otpTargetIdentifier,
+          options: {
+            shouldCreateUser: false,
+            emailRedirectTo: redirectUrl,
+          },
+        });
+        if (resendError) {
+          const rawMsg = resendError.message.toLowerCase();
+          if (rawMsg.includes('rate limit')) {
+            setError('Too many requests. Please wait a minute before requesting another code.');
+          } else {
+            setError(resendError.message);
+          }
+          return { success: false };
+        }
+        return {
+          success: true,
+          deliveryFeedback: 'A new 6-digit verification code has been dispatched to your email. Enter the code below without clicking any link.',
+          providerConfigured: true,
+        };
+      } catch (err: any) {
+        setError(err.message || 'Failed to resend code.');
+        return { success: false };
+      }
+    }
+
+    try {
+      const data = await apiFetch('/auth/otp/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          identifier: otpTargetIdentifier,
+          channel: otpChannel,
+          purpose: 'LOGIN',
+        }),
+      });
+      return {
+        success: true,
+        deliveryFeedback: data.deliveryFeedback,
+        providerConfigured: data.providerConfigured,
+        mockCode: data.mockCode,
+      };
+    } catch (err: any) {
+      setError(err.message || 'Failed to resend code.');
+      return { success: false };
+    }
+  };
+
+  // 4. Verify Login OTP
+  const handleVerifyLoginOtp = async (code: string) => {
+    if (loading) return;
+    setLoading(true);
+    setError('');
+
+    if (otpChannel === 'EMAIL' && isSupabaseConfigured() && supabase) {
+      try {
+        const { data: verifyData, error: verifyError } = await supabase.auth.verifyOtp({
+          email: otpTargetIdentifier,
+          token: code.trim(),
+          type: 'email',
+        });
+
+        if (verifyError || !verifyData?.session?.access_token) {
+          let errorMessage = 'Invalid or expired 6-digit login code. Please check and try again.';
+          if (verifyError) {
+            const rawMsg = verifyError.message.toLowerCase();
+            if (rawMsg.includes('expired')) {
+              errorMessage = 'The verification code has expired. Please tap "Resend code" to receive a new one.';
+            } else if (rawMsg.includes('invalid') || rawMsg.includes('token') || rawMsg.includes('otp')) {
+              errorMessage = 'Invalid 6-digit login code. Please check your email and enter the latest code.';
+            } else {
+              errorMessage = verifyError.message;
+            }
+          }
+          setError(errorMessage);
+          setLoading(false);
+          return;
+        }
+
+        // Idempotently sync user profile with LifeLink backend
+        const syncedUser = await syncSupabaseSession(verifyData.session.access_token);
+        navigate(getRedirectForRole(syncedUser.role), { replace: true });
+      } catch (err: any) {
+        setError(err.message || 'Verification succeeded, but session restoration failed.');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    try {
+      const data = await apiFetch('/auth/otp/verify', {
+        method: 'POST',
+        body: JSON.stringify({
+          identifier: otpTargetIdentifier,
+          channel: otpChannel,
+          purpose: 'LOGIN',
+          code,
+        }),
+      });
+
+      login(data.token, data.user);
+      navigate(getRedirectForRole(data.user.role), { replace: true });
+    } catch (err: any) {
+      setError(err.message || 'Invalid verification code.');
+      if (err.remainingAttempts !== undefined) {
+        setRemainingAttempts(err.remainingAttempts);
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="relative min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 flex flex-col justify-center py-12 sm:px-6 lg:px-8 overflow-hidden font-sans transition-colors">
-      {/* Floating Theme Toggle */}
-      <div className="absolute top-6 right-6 z-30">
-        <ThemeToggle />
-      </div>
-
-      {/* Background glowing decorations */}
-      <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-rose-500/10 blur-[120px]" />
-      <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-blue-500/10 blur-[120px]" />
-
-      <div className="sm:mx-auto sm:w-full sm:max-w-md z-10">
-        <div className="flex justify-center items-center gap-2">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-rose-600 to-rose-500 flex items-center justify-center shadow-lg shadow-rose-500/30">
-            <Activity className="w-6 h-6 text-white" />
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col justify-between selection:bg-teal-500/20 transition-colors">
+      {/* Top Header */}
+      <header className="max-w-6xl w-full mx-auto px-6 py-6 flex items-center justify-between">
+        <Link to="/" className="flex items-center gap-3 group">
+          <div className="w-9 h-9 rounded-xl bg-teal-600 flex items-center justify-center text-white shadow-md shadow-teal-600/30 group-hover:scale-105 transition-transform">
+            <ShieldAlert className="w-5 h-5" />
           </div>
-          <span className="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-slate-900 via-slate-800 to-slate-650 dark:from-white dark:via-slate-200 dark:to-rose-400 bg-clip-text text-transparent">
-            LifeLink
-          </span>
+          <span className="text-lg font-black tracking-tight uppercase font-mono">LifeLink</span>
+        </Link>
+        <div className="flex items-center gap-4">
+          <ThemeToggle />
+          <Link
+            to="/register"
+            className="text-xs font-semibold text-teal-600 dark:text-teal-400 hover:underline"
+          >
+            New Patient? Register Account
+          </Link>
         </div>
-        <h2 className="mt-6 text-center text-xl font-medium text-slate-500 dark:text-slate-400">
-          Emergency Medical Dispatch Platform
-        </h2>
-      </div>
+      </header>
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md z-10 px-4">
-        <div className="bg-white dark:bg-slate-950/40 backdrop-blur-xl p-8 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl relative transition-colors">
-          {/* Role selector Tabs */}
-          <div className="flex bg-slate-100 dark:bg-slate-950/60 p-1.5 rounded-xl mb-6 border border-slate-200 dark:border-slate-800 transition-colors">
-            <button
-              onClick={() => {
-                setActiveTab('PATIENT');
-                setError('');
-              }}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 cursor-pointer ${
-                activeTab === 'PATIENT'
-                  ? 'bg-rose-600 text-white shadow-md shadow-rose-600/20'
-                  : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
-              }`}
-            >
-              <User className="w-4 h-4" />
-              Patient Portal
-            </button>
-            <button
-              onClick={() => {
-                setActiveTab('DRIVER');
-                setError('');
-              }}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 cursor-pointer ${
-                activeTab === 'DRIVER'
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20'
-                  : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
-              }`}
-            >
-              <Truck className="w-4 h-4" />
-              Ambulance Driver
-            </button>
-          </div>
+      {/* Main Container */}
+      <main className="max-w-md w-full mx-auto px-6 py-8">
+        {authMode === 'OTP' && otpStage === 'VERIFY' ? (
+          <OtpScreen
+            identifier={otpTargetIdentifier}
+            channel={otpChannel}
+            purpose="LOGIN"
+            maskedRecipient={maskedRecipient}
+            initialCooldown={60}
+            initialExpiresIn={otpChannel === 'EMAIL' ? 600 : 300}
+            providerConfigured={providerConfigured}
+            deliveryFeedback={deliveryFeedback}
+            mockCode={mockCode}
+            onVerify={handleVerifyLoginOtp}
+            onResend={handleResendLoginOtp}
+            onBackOrChange={() => setOtpStage('INPUT')}
+            loading={loading}
+            error={error}
+            remainingAttempts={remainingAttempts}
+          />
+        ) : (
+          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 p-6 sm:p-8">
+            {/* Header */}
+            <div className="text-center mb-6">
+              <div className="inline-flex items-center gap-2 px-3 py-1 bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 rounded-full text-xs font-semibold mb-3 border border-teal-100 dark:border-teal-900/60">
+                <ShieldCheck className="w-3.5 h-3.5 text-teal-600" />
+                <span>Secure LifeLink Portal</span>
+              </div>
+              <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+                Sign In to LifeLink
+              </h1>
+              <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+                Access emergency dispatch coordination, live ambulance maps, and health profiles.
+              </p>
+            </div>
 
-          <form onSubmit={handleLogin} className="space-y-5">
+            {/* Segmented Auth Mode Switch */}
+            <div className="flex p-1 bg-slate-100 dark:bg-slate-800 rounded-xl mb-6">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('PASSWORD');
+                  setError('');
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  authMode === 'PASSWORD'
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                }`}
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Password</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('OTP');
+                  setError('');
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  authMode === 'OTP'
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>One-Time Code (OTP)</span>
+              </button>
+            </div>
+
+            {/* Error Message */}
             {error && (
-              <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-455 text-sm space-y-2">
-                <div>{error}</div>
-                {error.toLowerCase().includes('administrative') && (
-                  <div className="flex gap-2 pt-2 border-t border-rose-500/20">
-                    <button
-                      type="button"
-                      onClick={() => navigate('/admin/login')}
-                      className="w-full py-1.5 px-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer"
-                    >
-                      Hospital Staff Login →
-                    </button>
-                  </div>
-                )}
+              <div className="mb-5 p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-400">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span>{error}</span>
               </div>
             )}
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
-                Email Address
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-450">
-                  <Mail className="w-4 h-4" />
-                </div>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="name@example.com"
-                  className="block w-full pl-10 pr-4 py-3 bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-rose-500 transition-colors text-sm"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
-                Password
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-455">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="block w-full pl-10 pr-4 py-3 bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-605 focus:outline-none focus:border-rose-500 transition-colors text-sm"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className={`w-full py-3.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 text-white shadow-lg transition-all duration-300 cursor-pointer disabled:opacity-70 ${
-                activeTab === 'PATIENT'
-                  ? 'bg-rose-600 hover:bg-rose-500 shadow-rose-600/10'
-                  : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/10'
-              }`}
-            >
-              {loading ? (
-                <HeartbeatLoader size="small" strokeColor="#ffffff" />
-              ) : (
-                <>
-                  Sign In
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </button>
-          </form>
-
-          {/* Social login option */}
-          <div className="mt-5 border-t border-slate-200 dark:border-slate-800 pt-5 flex flex-col items-center gap-3">
-            <div id="google-signin-button" className="w-full flex justify-center"></div>
-            
-            <button
-              type="button"
-              onClick={handleMockGoogleLogin}
-              className="w-full text-center text-slate-500 hover:text-slate-700 dark:hover:text-slate-400 text-3xs font-semibold uppercase tracking-widest mt-2 transition-colors cursor-pointer"
-            >
-              Autofill Seed Credentials (Developer Mode)
-            </button>
-          </div>
-
-          <div className="mt-6 text-center text-xs">
-            <span className="text-slate-500">New to LifeLink? </span>
-            <Link to="/register" className="text-rose-500 hover:text-rose-400 font-semibold transition-colors">
-              Create an account
-            </Link>
-          </div>
-
-          {/* Administrative Gateways */}
-          <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800/80 space-y-2 text-center">
-            <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono">
-              Staff & Administrative Portals
-            </span>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => navigate('/admin/login')}
-                className="flex-1 py-2 px-3 bg-slate-100 dark:bg-slate-900 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 border border-slate-200 dark:border-slate-800 hover:border-emerald-500/40 text-emerald-600 dark:text-emerald-400 rounded-xl text-2xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <span>🏥 Hospital Staff Portal</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => navigate('/register-hospital')}
-                className="flex-1 py-2 px-3 bg-slate-100 dark:bg-slate-900 hover:bg-teal-50 dark:hover:bg-teal-950/40 border border-slate-200 dark:border-slate-800 hover:border-teal-500/40 text-teal-600 dark:text-teal-400 rounded-xl text-2xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <span>📝 Register Hospital</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Google Setup Form Modal */}
-      {showGoogleSetup && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 max-w-lg w-full p-8 rounded-3xl shadow-2xl relative max-h-[90vh] overflow-y-auto">
-            <button
-              onClick={() => setShowGoogleSetup(false)}
-              className="absolute top-4 right-4 text-slate-500 hover:text-slate-300"
-            >
-              ✕
-            </button>
-
-            <div className="flex items-center gap-2.5 mb-6 text-rose-500">
-              <Activity className="w-6 h-6 animate-pulse" />
-              <span className="text-xl font-bold tracking-tight">Complete Google Signup</span>
-            </div>
-
-            <p className="text-slate-400 text-xs leading-relaxed mb-6">
-              This is your first time signing in with this Google Account. Please choose your portal role and fill in the missing details.
-            </p>
-
-            <form onSubmit={handleFinalizeGoogleSetup} className="space-y-4">
-              <div>
-                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                  Choose Role Portal
-                </label>
-                <div className="flex bg-slate-950/60 p-1 rounded-xl border border-slate-850">
-                  <button
-                    type="button"
-                    onClick={() => setGoogleSetupRole('PATIENT')}
-                    className={`flex-1 py-2 text-2xs font-bold rounded-lg transition-all ${
-                      googleSetupRole === 'PATIENT' ? 'bg-rose-600 text-white' : 'text-slate-400'
-                    }`}
-                  >
-                    Patient Profile
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setGoogleSetupRole('DRIVER')}
-                    className={`flex-1 py-2 text-2xs font-bold rounded-lg transition-all ${
-                      googleSetupRole === 'DRIVER' ? 'bg-blue-600 text-white' : 'text-slate-400'
-                    }`}
-                  >
-                    Ambulance Driver
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                  Phone Number
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
-                    <Phone className="w-4 h-4" />
-                  </div>
-                  <input
-                    type="tel"
-                    required
-                    value={googleSetupPhone}
-                    onChange={(e) => setGoogleSetupPhone(e.target.value)}
-                    placeholder="e.g. +15550199"
-                    className="block w-full pl-9 pr-4 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {googleSetupRole === 'PATIENT' ? (
-                <div className="space-y-4 pt-2 border-t border-slate-800">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Blood Type
-                      </label>
-                      <select
-                        value={googleSetupBlood}
-                        onChange={(e) => setGoogleSetupBlood(e.target.value)}
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none"
-                      >
-                        {['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'].map((type) => (
-                          <option key={type} value={type} className="bg-slate-900 text-slate-200">{type}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Allergies
-                      </label>
-                      <input
-                        type="text"
-                        value={googleSetupAllergies}
-                        onChange={(e) => setGoogleSetupAllergies(e.target.value)}
-                        placeholder="Penicillin, etc."
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Emergency Contact Name
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={googleSetupContactName}
-                        onChange={(e) => setGoogleSetupContactName(e.target.value)}
-                        placeholder="Jane Doe"
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Emergency Contact Phone
-                      </label>
-                      <input
-                        type="tel"
-                        required
-                        value={googleSetupContactPhone}
-                        onChange={(e) => setGoogleSetupContactPhone(e.target.value)}
-                        placeholder="+15550299"
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                      Critical Medical Notes
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={googleSetupNotes}
-                      onChange={(e) => setGoogleSetupNotes(e.target.value)}
-                      placeholder="Takes insulin, etc."
-                      className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
+            {/* MODE A: PASSWORD LOGIN */}
+            {authMode === 'PASSWORD' ? (
+              <form onSubmit={handlePasswordLogin} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                    Email or Mobile Number
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      required
+                      value={identifier}
+                      onChange={(e) => setIdentifier(e.target.value)}
+                      placeholder="name@example.com or 9876543210"
+                      className="w-full h-11 pl-10 pr-4 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 text-slate-900 dark:text-slate-100"
                     />
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
                   </div>
                 </div>
-              ) : (
-                <div className="space-y-4 pt-2 border-t border-slate-800">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Vehicle Plate Number
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={googleSetupVehicle}
-                        onChange={(e) => setGoogleSetupVehicle(e.target.value)}
-                        placeholder="AMB-909"
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                        Ambulance Level
-                      </label>
-                      <select
-                        value={googleSetupAmbType}
-                        onChange={(e) => setGoogleSetupAmbType(e.target.value)}
-                        className="block w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none"
-                      >
-                        <option value="BASIC_LIFE_SUPPORT" className="bg-slate-900 text-slate-200">Basic Life Support</option>
-                        <option value="ADVANCED_LIFE_SUPPORT" className="bg-slate-900 text-slate-200">Advanced Life Support</option>
-                        <option value="OXYGEN_SUPPORT" className="bg-slate-900 text-slate-200">Oxygen Support</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
-              )}
 
-              <button
-                type="submit"
-                className={`w-full py-3 mt-4 text-xs font-bold text-white rounded-xl shadow-lg transition-all ${
-                  googleSetupRole === 'PATIENT' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-blue-600 hover:bg-blue-500'
-                }`}
-              >
-                Complete Profile & Launch App
-              </button>
-            </form>
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Password
+                    </label>
+                    <Link
+                      to="/forgot-password"
+                      className="text-xs font-semibold text-teal-600 dark:text-teal-400 hover:underline"
+                    >
+                      Forgot password?
+                    </Link>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className="w-full h-11 pl-10 pr-10 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 text-slate-900 dark:text-slate-100"
+                    />
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3.5 top-3.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full h-11 mt-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs uppercase tracking-wider transition-all shadow-md shadow-teal-600/20 active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <div className="flex items-center gap-2">
+                      <HeartbeatLoader size="small" />
+                      <span>Authenticating...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span>Sign In</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </div>
+                  )}
+                </button>
+              </form>
+            ) : (
+              /* MODE B: PASSWORDLESS OTP LOGIN */
+              <form onSubmit={handleRequestLoginOtp} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                    Registered Email or Mobile Number
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      required
+                      value={identifier}
+                      onChange={(e) => setIdentifier(e.target.value)}
+                      placeholder="name@example.com or 9876543210"
+                      className="w-full h-11 pl-10 pr-4 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 text-slate-900 dark:text-slate-100"
+                    />
+                    <Smartphone className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  </div>
+                  <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                    We will send a 6-digit verification code to sign you in passwordlessly.
+                  </p>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading || !identifier.trim()}
+                  className="w-full h-11 mt-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs uppercase tracking-wider transition-all shadow-md shadow-teal-600/20 active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <div className="flex items-center gap-2">
+                      <HeartbeatLoader size="small" />
+                      <span>Sending OTP...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span>Send One-Time Code</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </div>
+                  )}
+                </button>
+              </form>
+            )}
+
+            {/* Quick Portals Navigation */}
+            <div className="mt-8 pt-5 border-t border-slate-100 dark:border-slate-800 text-center">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 block mb-3">
+                Other Access Portals
+              </span>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <Link
+                  to="/admin/login"
+                  className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 flex items-center justify-center gap-1.5 font-medium text-slate-700 dark:text-slate-300 transition-colors"
+                >
+                  <Building className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Hospital Admin</span>
+                </Link>
+                <Link
+                  to="/register-hospital"
+                  className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 flex items-center justify-center gap-1.5 font-medium text-slate-700 dark:text-slate-300 transition-colors"
+                >
+                  <Truck className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Join Network</span>
+                </Link>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="max-w-6xl w-full mx-auto px-6 py-6 text-center text-xs text-slate-400 dark:text-slate-600">
+        &copy; {new Date().getFullYear()} LifeLink Emergency Network. Certified DPDP & HIPAA compliant.
+      </footer>
     </div>
   );
 };

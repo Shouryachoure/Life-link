@@ -1,71 +1,34 @@
-import { PrismaClient } from '@prisma/client';
+import prisma from './db';
 
-const candidateUrls: string[] = [];
-const ports = [5432, 5433];
-const users = ['postgres', 'Atharva'];
-const passwords = [
-  '',
-  'postgres',
-  'admin',
-  'root',
-  'password',
-  'password123',
-  '123456',
-  '12345678',
-  'admin123',
-  'postgres123',
-  'root123',
-  '1234',
-  'Postgres',
-  'Postgres123',
-  'Atharva',
-];
+/**
+ * Diagnostic utility to check local PostgreSQL connectivity.
+ * Tests if the database defined in DATABASE_URL responds to a simple query.
+ */
+async function checkDatabaseConnection() {
+  const dbUrl = process.env.DATABASE_URL || 'NOT CONFIGURED';
+  // Mask password in database URL for safe logging
+  const maskedUrl = dbUrl.replace(/:([^:@]+)@/, ':****@');
+  console.log(`[DB Check] Connecting to database at: ${maskedUrl}`);
 
-for (const port of ports) {
-  for (const user of users) {
-    for (const pw of passwords) {
-      if (pw === '') {
-        candidateUrls.push(`postgresql://${user}@localhost:${port}/postgres`);
-      } else {
-        candidateUrls.push(`postgresql://${user}:${pw}@localhost:${port}/postgres`);
-      }
-    }
-  }
-}
-
-async function testConnection(url: string): Promise<boolean> {
-  const cleanUrl = url.replace(/:[^:@]+@/, ':****@');
-  const prisma = new PrismaClient({
-    datasources: {
-      db: {
-        url,
-      },
-    },
-  });
   try {
-    await prisma.$connect();
-    await prisma.$executeRawUnsafe('SELECT 1');
-    await prisma.$disconnect();
-    console.log(`SUCCESS: ${cleanUrl}`);
-    return true;
+    const startTime = Date.now();
+    await prisma.$queryRaw`SELECT 1`;
+    const latency = Date.now() - startTime;
+    console.log(`[DB Check] PostgreSQL connection successful! (Latency: ${latency}ms)`);
   } catch (err: any) {
-    // console.log(`Failed: ${cleanUrl} -> ${err.message.substring(0, 50)}...`);
+    console.error(`[DB Check] PostgreSQL connection failed: ${err.message}`);
+    console.log(`\nTo set up local PostgreSQL for LifeLink:`);
+    console.log(`1. Ensure PostgreSQL is installed and the service is running on port 5432.`);
+    console.log(`2. Create a database, e.g.: CREATE DATABASE lifelink;`);
+    console.log(`3. Set DATABASE_URL in backend/.env: DATABASE_URL="postgresql://user:password@localhost:5432/lifelink"`);
+    console.log(`4. Run migrations: npm run prisma:migrate --prefix backend`);
+  } finally {
     await prisma.$disconnect();
-    return false;
   }
 }
 
-async function run() {
-  console.log(`Testing ${candidateUrls.length} connection combinations...`);
-  for (const url of candidateUrls) {
-    const success = await testConnection(url);
-    if (success) {
-      console.log(`\nFound working database URL: ${url}`);
-      console.log(`Please update DATABASE_URL in .env to match this pattern.`);
-      return;
-    }
-  }
-  console.log('\nCould not connect to PostgreSQL with any candidate URL.');
+if (require.main === module) {
+  checkDatabaseConnection();
 }
 
-run();
+export { checkDatabaseConnection };

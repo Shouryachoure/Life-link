@@ -51,6 +51,27 @@ router.post('/join', authenticate, async (req: AuthRequest, res) => {
   }
 
   try {
+    // 1. Prevent duplicate active queue registrations for the same patient/hospital/specialty
+    const existingEntry = await prisma.queueEntry.findFirst({
+      where: {
+        hospitalId,
+        patientId: req.user.id,
+        specialty,
+        status: QueueStatus.WAITING,
+      },
+      include: {
+        hospital: { select: { id: true, name: true, isDemo: true } },
+      },
+    });
+
+    if (existingEntry) {
+      return res.status(409).json({
+        message: `You are already registered in the ${specialty} wait queue at ${existingEntry.hospital?.name || 'this hospital'}. Your active queue position is #${existingEntry.queuePosition}.`,
+        code: 'DUPLICATE_QUEUE_REGISTRATION',
+        entry: existingEntry,
+      });
+    }
+
     // Determine the next queue position for this specialty at the hospital
     const activeEntriesCount = await prisma.queueEntry.count({
       where: {
@@ -61,6 +82,7 @@ router.post('/join', authenticate, async (req: AuthRequest, res) => {
     });
 
     const queuePosition = activeEntriesCount + 1;
+    const queueToken = `LLQ-${specialty.slice(0, 3).toUpperCase()}-${queuePosition.toString().padStart(3, '0')}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
 
     const entry = await prisma.queueEntry.create({
       data: {
@@ -75,7 +97,15 @@ router.post('/join', authenticate, async (req: AuthRequest, res) => {
       },
     });
 
-    return res.status(201).json(entry);
+    return res.status(201).json({
+      ...entry,
+      queueToken,
+      registeredAt: new Date().toISOString(),
+      isDemonstrationQueue: entry.hospital?.isDemo ?? false,
+      disclaimer: entry.hospital?.isDemo
+        ? 'DEMONSTRATION QUEUE: This is a simulated OPD wait queue. Real clinical consultation requires verified on-site check-in.'
+        : 'OPD TRIAGE QUEUE: Please present your queue token at the hospital registration desk upon arrival.',
+    });
   } catch (error: any) {
     return res.status(500).json({ message: error.message || 'Internal server error' });
   }

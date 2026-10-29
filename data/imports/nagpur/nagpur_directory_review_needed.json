@@ -1,0 +1,65 @@
+[
+  {
+    "id": "review-coord-001",
+    "entityType": "FACILITY",
+    "entityName": "Primary Health Centre (PHC) Parseoni",
+    "issueType": "MISSING_COORDINATES",
+    "severity": "LOW",
+    "description": "Rural health facility verified via NHM Directory but exact GPS coordinates require field geocoding validation before map placement.",
+    "rawRecord": {
+      "name": "Primary Health Centre Parseoni",
+      "facilityType": "PRIMARY_HEALTH_CENTRE",
+      "ownership": "GOVERNMENT_STATE",
+      "contactNumber": "07102-232025",
+      "address": "Near Bus Stand, Parseoni, Nagpur District, Maharashtra 441105",
+      "locality": "Parseoni",
+      "city": "Parseoni",
+      "district": "Nagpur",
+      "sourceUrl": "https://nagpur.gov.in/public-utility-category/hospitals/"
+    },
+    "suggestedCorrection": {
+      "approximateLat": 21.3822,
+      "approximateLng": 79.1678,
+      "note": "Verify against Parseoni Tahsil Office landmark"
+    },
+    "status": "OPEN",
+    "reportedAt": "2026-10-27T00:00:00.000Z"
+  },
+  {
+    "id": "review-dup-002",
+    "entityType": "FACILITY",
+    "entityName": "Alexis Hospital Mankapur (Historical Name Match)",
+    "issueType": "POTENTIAL_DUPLICATE",
+    "severity": "MEDIUM",
+    "description": "Alexis Hospital was acquired and rebranded to 'Max Super Speciality Hospital Nagpur'. Records sharing the Survey No. 232 Mankapur address and telephone 0712-7120000 must be marked as alias/duplicate rather than co-located facilities.",
+    "rawRecord": {
+      "name": "Alexis Multispeciality Hospital",
+      "facilityType": "PRIVATE_MULTISPECIALTY",
+      "contactNumber": "0712-7120000",
+      "address": "Survey No. 232, Mankapur, Koradi Road, Nagpur 440030"
+    },
+    "suggestedCorrection": {
+      "action": "MARK_DUPLICATE_ALIAS",
+      "primaryFacilityId": "fac-max-alexis-nagpur",
+      "resolutionNotes": "Maintain 'Alexis Hospital' as alternate name on fac-max-alexis-nagpur"
+    },
+    "status": "OPEN",
+    "reportedAt": "2026-10-27T00:00:00.000Z"
+  },
+  {
+    "id": "review-phone-003",
+    "entityType": "AMBULANCE_SERVICE",
+    "entityName": "Sai Krupa Local Patient Van Nagpur",
+    "issueType": "INVALID_PHONE",
+    "severity": "HIGH",
+    "description": "Public directory listing has a 9-digit truncated telephone number '982201234'. Number is unroutable and flagged for manual directory verification.",
+    "rawRecord": {
+      "serviceName": "Sai Krupa Local Patient Van",
+      "operatorType": "PRIVATE_OPERATOR",
+      "contactNumber": "982201234",
+      "sourceUrl": "https://nagpuryellowpages.in"
+    },
+    "status": "OPEN",
+    "reportedAt": "2026-10-27T00:00:00.000Z"
+  }
+]

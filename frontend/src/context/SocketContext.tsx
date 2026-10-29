@@ -1,10 +1,16 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useAuth } from './AuthContext';
+import { recordLastSyncTimestamp } from '../utils/offlineStorage';
+import { getSocketUrl } from '../config/apiConfig';
 
 interface SocketContextType {
   socket: Socket | null;
   connected: boolean;
+  isReconnecting: boolean;
+  reconnectAttempt: number;
+  lastConnectedAt: number | null;
+  reconnect: () => void;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
@@ -13,6 +19,25 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const { user, token } = useAuth();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [lastConnectedAt, setLastConnectedAt] = useState<number | null>(null);
+
+  const registerUser = useCallback((sock: Socket, currentUser: any) => {
+    if (!currentUser) return;
+    if (currentUser.role === 'PATIENT') {
+      sock.emit('patient:register', currentUser.id);
+    } else if (currentUser.role === 'DRIVER') {
+      sock.emit('driver:register', currentUser.id);
+    } else if (currentUser.role === 'ADMIN_HOSPITAL') {
+      sock.emit('hospital:register', currentUser.id);
+    } else if (currentUser.role === 'OPERATOR_ADMIN') {
+      sock.emit('operator:register', currentUser.id);
+    } else if (currentUser.role === 'SUPER_ADMIN') {
+      sock.emit('telemetry:register');
+      sock.emit('superadmin:register');
+    }
+  }, []);
 
   useEffect(() => {
     if (!token || !user) {
@@ -20,33 +45,73 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         socket.disconnect();
         setSocket(null);
         setConnected(false);
+        setIsReconnecting(false);
       }
       return;
     }
 
-    const newSocket = io('http://localhost:5000', {
+    const socketUrl = getSocketUrl();
+
+    // Bounded reconnection with exponential backoff (1s initial, 5s max, 15 attempts)
+    const newSocket = io(socketUrl, {
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 15,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+      auth: {
+        token,
+      },
     });
 
     newSocket.on('connect', () => {
       setConnected(true);
-      console.log('Socket connected to backend');
-
-      // Register with the socket server depending on role
-      if (user.role === 'PATIENT') {
-        newSocket.emit('patient:register', user.id);
-      } else if (user.role === 'DRIVER') {
-        newSocket.emit('driver:register', user.id);
-      } else if (user.role === 'ADMIN_HOSPITAL') {
-        newSocket.emit('hospital:register', user.id);
-      } else if (user.role === 'SUPER_ADMIN') {
-        newSocket.emit('telemetry:register');
-      }
+      setIsReconnecting(false);
+      setReconnectAttempt(0);
+      setLastConnectedAt(Date.now());
+      recordLastSyncTimestamp('socket:connect');
+      registerUser(newSocket, user);
+      console.log('Socket.IO safely connected to LifeLink backend');
     });
 
-    newSocket.on('disconnect', () => {
+    newSocket.on('reconnect', (attemptNumber) => {
+      setConnected(true);
+      setIsReconnecting(false);
+      setReconnectAttempt(0);
+      setLastConnectedAt(Date.now());
+      recordLastSyncTimestamp('socket:reconnect');
+      registerUser(newSocket, user);
+      console.log(`Socket.IO reconnected after ${attemptNumber} attempts. Broadcasting recovery event.`);
+      // Emit global recovery event so active screens refetch authoritative state
+      window.dispatchEvent(new CustomEvent('lifelink:reconnected', { detail: { attemptNumber } }));
+    });
+
+    newSocket.on('reconnect_attempt', (attempt) => {
+      setIsReconnecting(true);
+      setReconnectAttempt(attempt);
+      console.warn(`Socket.IO reconnect attempt ${attempt}...`);
+    });
+
+    newSocket.on('reconnect_error', () => {
+      setIsReconnecting(true);
+    });
+
+    newSocket.on('reconnect_failed', () => {
+      setIsReconnecting(false);
       setConnected(false);
-      console.log('Socket disconnected');
+      console.error('Socket.IO reconnection failed after max retries. Manual reconnection required.');
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      setConnected(false);
+      if (reason === 'io server disconnect') {
+        // Server actively disconnected; reconnect manually
+        newSocket.connect();
+      } else {
+        setIsReconnecting(true);
+      }
+      console.log(`Socket disconnected: ${reason}`);
     });
 
     setSocket(newSocket);
@@ -54,10 +119,26 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => {
       newSocket.disconnect();
     };
-  }, [token, user]);
+  }, [token, user?.id, user?.role, registerUser]);
+
+  const reconnect = useCallback(() => {
+    if (socket) {
+      setIsReconnecting(true);
+      socket.connect();
+    }
+  }, [socket]);
 
   return (
-    <SocketContext.Provider value={{ socket, connected }}>
+    <SocketContext.Provider
+      value={{
+        socket,
+        connected,
+        isReconnecting,
+        reconnectAttempt,
+        lastConnectedAt,
+        reconnect,
+      }}
+    >
       {children}
     </SocketContext.Provider>
   );

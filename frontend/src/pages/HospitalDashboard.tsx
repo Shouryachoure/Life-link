@@ -4,7 +4,9 @@ import { useSocket } from '../context/SocketContext';
 import { LeafletMap } from '../components/LeafletMap';
 import { ThemeToggle } from '../components/ui/ThemeToggle';
 import { HeartbeatLoader } from '../components/ui/HeartbeatLoader';
+import { ConfirmationModal } from '../components/ui/ConfirmationModal';
 import { DoctorAppointmentsSection } from '../components/hospital/DoctorAppointmentsSection';
+import { formatIndianPhone, maskIndianPhone, formatIndianDateTime } from '../utils/localization';
 import {
   Activity,
   Heart,
@@ -39,8 +41,12 @@ import {
   CheckSquare,
   Layers,
   Wrench,
-  Droplets
+  Droplets,
+  Sliders,
+  History,
+  BarChart3
 } from 'lucide-react';
+import { AnalyticsReportingView } from '../components/admin/AnalyticsReportingView';
 
 export const HospitalDashboard: React.FC = () => {
   const { user, logout, apiFetch, updateUser } = useAuth();
@@ -48,7 +54,7 @@ export const HospitalDashboard: React.FC = () => {
 
   // Active dashboard view tab
   const [activeDashboardTab, setActiveDashboardTab] = useState<
-    'DISPATCHES' | 'BEDS' | 'BOOKINGS' | 'APPOINTMENTS_DOCTORS' | 'CLEANING' | 'QUEUE' | 'FLEET' | 'ROSTER'
+    'DISPATCHES' | 'BEDS' | 'BOOKINGS' | 'APPOINTMENTS_DOCTORS' | 'CLEANING' | 'QUEUE' | 'FLEET' | 'ROSTER' | 'ANALYTICS'
   >('BEDS');
 
   // ER Beds & Clinical Capacity State
@@ -79,8 +85,21 @@ export const HospitalDashboard: React.FC = () => {
   const [showAddBedModal, setShowAddBedModal] = useState(false);
   const [newBedNumber, setNewBedNumber] = useState('');
   const [newBedWard, setNewBedWard] = useState('EMERGENCY_ER');
+  const [newBedCategory, setNewBedCategory] = useState('EMERGENCY');
   const [newBedNotes, setNewBedNotes] = useState('');
   const [addingBedLoading, setAddingBedLoading] = useState(false);
+  const [dischargeModalBed, setDischargeModalBed] = useState<any | null>(null);
+  const [dischargingLoading, setDischargingLoading] = useState(false);
+
+  // Hospital Capacity & Audit Log State (Requirement 2, 3, 5, 6)
+  const [showCapacityModal, setShowCapacityModal] = useState(false);
+  const [showAuditModal, setShowAuditModal] = useState(false);
+  const [capacityTotalBeds, setCapacityTotalBeds] = useState(0);
+  const [capacityAvailBeds, setCapacityAvailBeds] = useState(0);
+  const [capacityReason, setCapacityReason] = useState('');
+  const [updatingCapacity, setUpdatingCapacity] = useState(false);
+  const [capacityAuditLogs, setCapacityAuditLogs] = useState<any[]>([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
 
   // Bookings & Admissions State
   const [bookingsList, setBookingsList] = useState<any[]>([]);
@@ -377,25 +396,30 @@ export const HospitalDashboard: React.FC = () => {
     }
   };
 
-  const handleDischargePatient = async (bed: any) => {
-    if (
-      !window.confirm(
-        `Discharge ${bed.patientName || 'patient'} from ${bed.bedNumber}? Bed will automatically be sent to Housekeeping for Terminal Disinfection.`
-      )
-    )
-      return;
+  const handleDischargePatient = (bed: any) => {
+    setDischargeModalBed(bed);
+  };
 
+  const executeDischargePatient = async () => {
+    if (!dischargeModalBed) return;
+    setDischargingLoading(true);
     try {
-      await apiFetch(`/hospitals/beds/${bed.id}`, {
+      await apiFetch(`/hospitals/beds/${dischargeModalBed.id}`, {
         method: 'PUT',
         body: JSON.stringify({
           status: 'CLEANING',
-          cleaningPriority: bed.ward === 'ICU' || bed.ward === 'TRAUMA' ? 'TERMINAL_DISINFECTION' : 'ROUTINE',
+          cleaningPriority:
+            dischargeModalBed.ward === 'ICU' || dischargeModalBed.ward === 'TRAUMA'
+              ? 'TERMINAL_DISINFECTION'
+              : 'ROUTINE',
         }),
       });
+      setDischargeModalBed(null);
       fetchBeds();
     } catch (err: any) {
       alert(err.message || 'Discharge action failed');
+    } finally {
+      setDischargingLoading(false);
     }
   };
 
@@ -426,6 +450,7 @@ export const HospitalDashboard: React.FC = () => {
         body: JSON.stringify({
           bedNumber: newBedNumber,
           ward: newBedWard,
+          category: newBedCategory,
           notes: newBedNotes,
         }),
       });
@@ -437,6 +462,72 @@ export const HospitalDashboard: React.FC = () => {
       alert(err.message || 'Failed to register bed');
     } finally {
       setAddingBedLoading(false);
+    }
+  };
+
+  const handleUpdateCapacity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const hospitalId = user?.hospital?.id || (user as any)?.hospitalId;
+    if (!hospitalId) {
+      alert('Hospital record is not configured for this user.');
+      return;
+    }
+
+    setUpdatingCapacity(true);
+    try {
+      await apiFetch(`/hospitals/${hospitalId}/capacity`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          availableBeds: Number(capacityAvailBeds),
+          totalBeds: Number(capacityTotalBeds),
+          reason: capacityReason || 'Administrative capacity quota adjustment',
+        }),
+      });
+
+      setShowCapacityModal(false);
+      setCapacityReason('');
+      await fetchBeds();
+      alert('Hospital capacity updated and audited successfully.');
+    } catch (err: any) {
+      alert(err.message || 'Failed to update hospital capacity');
+    } finally {
+      setUpdatingCapacity(false);
+    }
+  };
+
+  const fetchAuditLogs = async () => {
+    const hospitalId = user?.hospital?.id || (user as any)?.hospitalId;
+    if (!hospitalId) return;
+    setLoadingAuditLogs(true);
+    try {
+      const data = await apiFetch(`/hospitals/${hospitalId}/capacity-history`);
+      setCapacityAuditLogs(data.auditLogs || []);
+    } catch (err: any) {
+      console.error('Failed to load capacity audit logs:', err);
+    } finally {
+      setLoadingAuditLogs(false);
+    }
+  };
+
+  const handleSetBedStatus = async (bedId: string, status: string, notes?: string) => {
+    try {
+      await apiFetch(`/hospitals/beds/${bedId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status, notes }),
+      });
+      fetchBeds();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update bed status');
+    }
+  };
+
+  const handleDeleteBed = async (bedId: string, bedNumber: string) => {
+    if (!confirm(`Are you sure you want to remove Bed ${bedNumber} from capacity inventory?`)) return;
+    try {
+      await apiFetch(`/hospitals/beds/${bedId}`, { method: 'DELETE' });
+      fetchBeds();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete bed');
     }
   };
 
@@ -685,6 +776,15 @@ export const HospitalDashboard: React.FC = () => {
     }
   };
 
+  const getCategoryBadge = (category?: string) => {
+    if (!category) return null;
+    return (
+      <span className="px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 text-[9px] font-extrabold uppercase">
+        {category}
+      </span>
+    );
+  };
+
   const getBedStatusBadge = (status: string) => {
     switch (status) {
       case 'AVAILABLE':
@@ -695,6 +795,8 @@ export const HospitalDashboard: React.FC = () => {
         return <span className="px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-black text-2xs uppercase tracking-wider flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-spin" /> Cleaning / Sanitizing</span>;
       case 'MAINTENANCE':
         return <span className="px-2.5 py-1 rounded-full bg-slate-500/15 text-slate-500 dark:text-slate-400 font-black text-2xs uppercase tracking-wider flex items-center gap-1.5"><Wrench className="w-3 h-3" /> Maintenance</span>;
+      case 'UNAVAILABLE':
+        return <span className="px-2.5 py-1 rounded-full bg-neutral-500/15 text-neutral-500 dark:text-neutral-400 font-black text-2xs uppercase tracking-wider flex items-center gap-1.5"><ShieldAlert className="w-3 h-3" /> Unavailable</span>;
       case 'RESERVED':
         return <span className="px-2.5 py-1 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-400 font-black text-2xs uppercase tracking-wider flex items-center gap-1.5"><Clock className="w-3 h-3" /> Inbound Reserved</span>;
       default:
@@ -949,6 +1051,18 @@ export const HospitalDashboard: React.FC = () => {
             <span>Driver Roster</span>
           </button>
 
+          <button
+            onClick={() => setActiveDashboardTab('ANALYTICS')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer shrink-0 ${
+              activeDashboardTab === 'ANALYTICS'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-900'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4 text-emerald-400" />
+            <span>Operations Analytics</span>
+          </button>
+
         </div>
       </section>
 
@@ -956,6 +1070,13 @@ export const HospitalDashboard: React.FC = () => {
           Main Content View Area
           ------------------------------------------------------------- */}
       <main className="max-w-7xl w-full mx-auto p-4 md:p-6 flex-1 flex flex-col gap-6">
+
+        {/* ============================================================
+            TAB: OPERATIONS ANALYTICS & REPORTING (Prompt 27)
+            ============================================================ */}
+        {activeDashboardTab === 'ANALYTICS' && (
+          <AnalyticsReportingView scopedHospitalId={user?.hospital?.id} />
+        )}
 
         {/* ============================================================
             TAB 1: WARD & BED FLOOR GRID
@@ -1016,7 +1137,33 @@ export const HospitalDashboard: React.FC = () => {
                   <option value="CLEANING">Cleaning Queue</option>
                   <option value="RESERVED">Reserved</option>
                   <option value="MAINTENANCE">Maintenance</option>
+                  <option value="UNAVAILABLE">Unavailable</option>
                 </select>
+
+                <button
+                  onClick={() => {
+                    setCapacityTotalBeds(bedStats.total);
+                    setCapacityAvailBeds(bedStats.available);
+                    setShowCapacityModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shrink-0 border border-slate-200 dark:border-slate-700"
+                  title="Configure total capacity, category quotas and baseline bed allotments"
+                >
+                  <Sliders className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Capacity Quotas</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    fetchAuditLogs();
+                    setShowAuditModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shrink-0 border border-slate-200 dark:border-slate-700"
+                  title="View immutable capacity and bed modification audit history"
+                >
+                  <History className="w-3.5 h-3.5 text-purple-500" />
+                  <span>Audit Trail</span>
+                </button>
 
                 <button
                   onClick={() => setShowAddBedModal(true)}
@@ -1047,6 +1194,7 @@ export const HospitalDashboard: React.FC = () => {
                   const isCleaning = bed.status === 'CLEANING';
                   const isReserved = bed.status === 'RESERVED';
                   const isMaintenance = bed.status === 'MAINTENANCE';
+                  const isUnavailable = bed.status === 'UNAVAILABLE';
 
                   return (
                     <div
@@ -1060,17 +1208,20 @@ export const HospitalDashboard: React.FC = () => {
                           ? 'border-amber-500/40 dark:border-amber-500/30 bg-amber-500/[0.02]'
                           : isReserved
                           ? 'border-blue-500/30 dark:border-blue-500/20'
+                          : isUnavailable
+                          ? 'border-neutral-400 dark:border-neutral-800 bg-neutral-500/5'
                           : 'border-slate-300 dark:border-slate-800 opacity-75'
                       }`}
                     >
                       {/* Top Bed Header */}
                       <div>
                         <div className="flex items-center justify-between gap-2 mb-2">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-base font-black text-slate-900 dark:text-white font-mono tracking-tight">
                               {bed.bedNumber}
                             </span>
                             {getWardBadge(bed.ward)}
+                            {getCategoryBadge(bed.category)}
                           </div>
                           {getBedStatusBadge(bed.status)}
                         </div>
@@ -1151,22 +1302,54 @@ export const HospitalDashboard: React.FC = () => {
                               <p className="text-[11px] text-slate-500">{bed.notes || 'Under engineering inspection.'}</p>
                             </div>
                           )}
+
+                          {isUnavailable && (
+                            <div className="space-y-1">
+                              <span className="text-xs font-bold text-neutral-400 flex items-center gap-1">
+                                <ShieldAlert className="w-3.5 h-3.5" /> Offline / Decommissioned
+                              </span>
+                              <p className="text-[11px] text-slate-500">{bed.notes || 'Decommissioned from active roster.'}</p>
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       {/* Action Buttons */}
                       <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-900 flex items-center gap-2">
                         {isAvailable && (
-                          <button
-                            onClick={() => {
-                              setSelectedBedForAdmit(bed);
-                              setShowAdmitModal(true);
-                            }}
-                            className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>Admit Patient</span>
-                          </button>
+                          <div className="flex items-center gap-1.5 w-full">
+                            <button
+                              onClick={() => {
+                                setSelectedBedForAdmit(bed);
+                                setShowAdmitModal(true);
+                              }}
+                              className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Admit</span>
+                            </button>
+                            <button
+                              onClick={() => handleSetBedStatus(bed.id, 'MAINTENANCE')}
+                              className="p-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl transition-colors cursor-pointer"
+                              title="Set Maintenance"
+                            >
+                              <Wrench className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleSetBedStatus(bed.id, 'UNAVAILABLE')}
+                              className="p-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-xl transition-colors cursor-pointer"
+                              title="Set Unavailable"
+                            >
+                              <ShieldAlert className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteBed(bed.id, bed.bedNumber)}
+                              className="p-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 rounded-xl transition-colors cursor-pointer"
+                              title="Remove Bed"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         )}
 
                         {isOccupied && (
@@ -1190,13 +1373,22 @@ export const HospitalDashboard: React.FC = () => {
                           </button>
                         )}
 
-                        {(isReserved || isMaintenance) && (
-                          <button
-                            onClick={() => handleQuickCleanBed(bed.id, 'COMPLETE')}
-                            className="w-full py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                          >
-                            Restore to Available
-                          </button>
+                        {(isReserved || isMaintenance || isUnavailable) && (
+                          <div className="flex items-center gap-1.5 w-full">
+                            <button
+                              onClick={() => handleSetBedStatus(bed.id, 'AVAILABLE')}
+                              className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                            >
+                              Restore to Available
+                            </button>
+                            <button
+                              onClick={() => handleDeleteBed(bed.id, bed.bedNumber)}
+                              className="p-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 rounded-xl transition-colors cursor-pointer"
+                              title="Remove Bed"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1311,7 +1503,7 @@ export const HospitalDashboard: React.FC = () => {
               {/* Map View */}
               <div className="h-[360px] w-full rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 relative">
                 <LeafletMap
-                  hospitalLoc={[user?.hospital?.lat || 37.7749, user?.hospital?.lng || -122.4194]}
+                  hospitalLoc={[user?.hospital?.lat || 21.1458, user?.hospital?.lng || 79.0882]}
                   driverLoc={
                     selectedEmergency?.driver?.ambulance
                       ? [selectedEmergency.driver.ambulance.currentLat, selectedEmergency.driver.ambulance.currentLng]
@@ -2001,6 +2193,24 @@ export const HospitalDashboard: React.FC = () => {
               </div>
 
               <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Bed Category / Specialty</label>
+                <select
+                  value={newBedCategory}
+                  onChange={(e) => setNewBedCategory(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs focus:outline-none"
+                >
+                  <option value="EMERGENCY">Emergency / Trauma</option>
+                  <option value="ICU">ICU Critical Care</option>
+                  <option value="GENERAL">General Inpatient</option>
+                  <option value="PEDIATRIC">Pediatric Ward</option>
+                  <option value="SURGICAL">Surgical Post-Op</option>
+                  <option value="NEONATAL">Neonatal Intensive Care (NICU)</option>
+                  <option value="BURN_UNIT">Burn Unit Care</option>
+                  <option value="CARDIAC">Cardiac Telemetry</option>
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Equipment Notes</label>
                 <input
                   type="text"
@@ -2028,6 +2238,207 @@ export const HospitalDashboard: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================
+          MODAL: CAPACITY & QUOTA CONFIGURATION (Requirement 2, 4, 5, 9)
+          ============================================================ */}
+      {showCapacityModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 max-w-lg w-full p-6 rounded-3xl shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sliders className="w-5 h-5 text-blue-500" />
+                <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                  Hospital Capacity & Quotas Management
+                </h4>
+              </div>
+              <button onClick={() => setShowCapacityModal(false)} className="text-slate-400 hover:text-slate-200 text-sm">✕</button>
+            </div>
+
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Configure baseline total beds and available capacity. Changes are atomically validated and permanently recorded in the immutable clinical audit log.
+            </p>
+
+            <form onSubmit={handleUpdateCapacity} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Total Configured Beds</label>
+                  <input
+                    type="number"
+                    min={0}
+                    required
+                    value={capacityTotalBeds}
+                    onChange={(e) => setCapacityTotalBeds(parseInt(e.target.value, 10) || 0)}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-bold focus:outline-none"
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">Currently occupied: {bedStats.occupied} beds</span>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Available Ready Beds</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={capacityTotalBeds}
+                    required
+                    value={capacityAvailBeds}
+                    onChange={(e) => setCapacityAvailBeds(parseInt(e.target.value, 10) || 0)}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-bold focus:outline-none"
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">Max: {capacityTotalBeds} beds</span>
+                </div>
+              </div>
+
+              {capacityAvailBeds > capacityTotalBeds && (
+                <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Validation Error: Available beds cannot exceed total configured beds.</span>
+                </div>
+              )}
+
+              {capacityTotalBeds < bedStats.occupied && (
+                <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-600 dark:text-rose-400 font-semibold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Validation Error: Total beds cannot be less than currently admitted patients ({bedStats.occupied}).</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Reason for Capacity Adjustment (Audit Trail)</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Ward 4 expansion commissioned / seasonal surge allocation"
+                  value={capacityReason}
+                  onChange={(e) => setCapacityReason(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCapacityModal(false)}
+                  className="flex-1 py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={updatingCapacity || capacityAvailBeds > capacityTotalBeds || capacityTotalBeds < bedStats.occupied}
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                >
+                  {updatingCapacity ? 'Saving...' : 'Update & Record Audit'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================
+          MODAL: CAPACITY & AVAILABILITY AUDIT TRAIL (Requirement 5, 6, 10)
+          ============================================================ */}
+      {showAuditModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 max-w-4xl w-full p-6 rounded-3xl shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <History className="w-5 h-5 text-purple-500" />
+                <div>
+                  <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                    Clinical Capacity & Bed Availability Audit Trail
+                  </h4>
+                  <span className="text-[11px] text-slate-400">
+                    Cryptographically authenticated log of all capacity modifications and bed allocations
+                  </span>
+                </div>
+              </div>
+              <button onClick={() => setShowAuditModal(false)} className="text-slate-400 hover:text-slate-200 text-sm">✕</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {loadingAuditLogs ? (
+                <div className="py-12 flex justify-center">
+                  <HeartbeatLoader />
+                </div>
+              ) : capacityAuditLogs.length === 0 ? (
+                <div className="py-12 text-center text-slate-400 text-xs">
+                  No capacity changes recorded yet in the audit log for this facility.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-800 text-[10px] font-mono text-slate-400 uppercase">
+                        <th className="py-2.5 px-3">Timestamp</th>
+                        <th className="py-2.5 px-3">Operator</th>
+                        <th className="py-2.5 px-3">Action</th>
+                        <th className="py-2.5 px-3">Category</th>
+                        <th className="py-2.5 px-3">Available Bed Delta</th>
+                        <th className="py-2.5 px-3">Total Bed Delta</th>
+                        <th className="py-2.5 px-3">Reason / Clinical Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                      {capacityAuditLogs.map((log) => (
+                        <tr key={log.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                          <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500">
+                            {new Date(log.timestamp).toLocaleString([], {
+                              month: 'short',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="font-bold text-slate-800 dark:text-slate-200 block truncate max-w-[120px]">
+                              {log.changedByName}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-400 uppercase block">
+                              {log.changedByRole}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase font-mono bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20">
+                              {log.action}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-[10px] text-slate-500">
+                            {log.category || 'ALL'}
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-[11px]">
+                            <span className="text-slate-400">{log.previousAvailable}</span>
+                            <span className="text-slate-400 mx-1">→</span>
+                            <span className="font-bold text-emerald-600 dark:text-emerald-400">{log.newAvailable}</span>
+                          </td>
+                          <td className="py-2.5 px-3 font-mono text-[11px]">
+                            <span className="text-slate-400">{log.previousTotal}</span>
+                            <span className="text-slate-400 mx-1">→</span>
+                            <span className="font-bold text-blue-600 dark:text-blue-400">{log.newTotal}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px] text-slate-600 dark:text-slate-300 max-w-[200px] truncate" title={log.reason}>
+                            {log.reason || '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-end">
+              <button
+                onClick={() => setShowAuditModal(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl cursor-pointer"
+              >
+                Close Audit Trail
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2254,6 +2665,19 @@ export const HospitalDashboard: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Accessible Confirmation Modal for Patient Discharge & Bed Terminal Sanitation */}
+      <ConfirmationModal
+        isOpen={!!dischargeModalBed}
+        title="Discharge Patient & Begin Terminal Sanitation"
+        description={`Are you sure you want to discharge ${dischargeModalBed?.patientName || 'the patient'} from Bed ${dischargeModalBed?.bedNumber}? This bed will automatically transition to Housekeeping for Terminal Disinfection.`}
+        confirmLabel="Confirm Discharge"
+        cancelLabel="Cancel"
+        isDestructive={true}
+        loading={dischargingLoading}
+        onConfirm={executeDischargePatient}
+        onCancel={() => setDischargeModalBed(null)}
+      />
 
     </div>
   );

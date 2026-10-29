@@ -1,0 +1,101 @@
+# ==============================================================================
+# LifeLink India — Production & Local Multi-Container Docker Compose Stack
+# ==============================================================================
+# Runs entirely on free software (Alpine Linux, PostgreSQL 16, Node 20, Nginx).
+# Zero paid external dependencies required.
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. PostgreSQL Database Service
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: lifelink-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-lifelink}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - lifelink_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-lifelink}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 2. LifeLink Express & Socket.IO API Backend
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: lifelink-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-lifelink}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-ReplaceWith64HexCharProductionSecretForLifeLink2026}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-ReplaceWithSecond64HexCharProductionRefreshKey2026}
+      SUPER_ADMIN_TOTP_SECRET: ${SUPER_ADMIN_TOTP_SECRET:-SUPERADMINBASE32KEY}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost,http://localhost:80,http://localhost:5173}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+    ports:
+      - "5000:5000"
+    volumes:
+      - document_uploads:/app/uploads
+    networks:
+      - lifelink_net
+    command: >
+      sh -c "npx prisma migrate deploy && node dist/server.js"
+
+  # ----------------------------------------------------------------------------
+  # 3. LifeLink React Frontend (Nginx Reverse Proxy)
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: lifelink-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    networks:
+      - lifelink_net
+
+# ==============================================================================
+# Persistent Named Volumes (Data Integrity & Disaster Recovery)
+# ==============================================================================
+volumes:
+  postgres_data:
+    name: lifelink_postgres_data
+  document_uploads:
+    name: lifelink_document_uploads
+
+# ==============================================================================
+# Isolated Bridge Network
+# ==============================================================================
+networks:
+  lifelink_net:
+    name: lifelink_network
+    driver: bridge

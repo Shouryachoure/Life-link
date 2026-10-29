@@ -4,6 +4,8 @@ import { useSocket } from '../context/SocketContext';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import { ThemeToggle } from '../components/ui/ThemeToggle';
 import { HeartbeatLoader } from '../components/ui/HeartbeatLoader';
+import { ConfirmationModal } from '../components/ui/ConfirmationModal';
+import { formatIndianPhone, maskIndianPhone, formatIndianDateTime } from '../utils/localization';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -31,8 +33,14 @@ import {
   Filter,
   Eye,
   RefreshCw,
-  X
+  X,
+  Radio,
+  BarChart3
 } from 'lucide-react';
+import { CommandCenterView } from '../components/admin/CommandCenterView';
+import { AnalyticsReportingView } from '../components/admin/AnalyticsReportingView';
+import { NagpurDirectoryManagement } from '../components/admin/NagpurDirectoryManagement';
+import { NetworkActivationConsole } from '../components/admin/NetworkActivationConsole';
 
 // Custom icons
 const hospitalIcon = L.divIcon({
@@ -62,8 +70,8 @@ export const SuperAdminDashboard: React.FC = () => {
 
   // Active view tab
   const [activeTab, setActiveTab] = useState<
-    'TELEMETRY' | 'HOSPITALS' | 'HOSPITAL_ADMINS' | 'REGISTRATIONS' | 'ACTIVITY_LOGS' | 'SEED' | 'USERS'
-  >('TELEMETRY');
+    'COMMAND_CENTER' | 'ANALYTICS' | 'DIRECTORY' | 'ACTIVATION' | 'TELEMETRY' | 'HOSPITALS' | 'HOSPITAL_ADMINS' | 'REGISTRATIONS' | 'ACTIVITY_LOGS' | 'SEED' | 'USERS'
+  >('COMMAND_CENTER');
 
   // Server telemetry data
   const [telemetry, setTelemetry] = useState<any>({
@@ -83,8 +91,8 @@ export const SuperAdminDashboard: React.FC = () => {
   const [hName, setHName] = useState('');
   const [hAddress, setHAddress] = useState('');
   const [hPhone, setHPhone] = useState('');
-  const [hLat, setHLat] = useState('37.7749');
-  const [hLng, setHLng] = useState('-122.4194');
+  const [hLat, setHLat] = useState('21.1458');
+  const [hLng, setHLng] = useState('79.0882');
   const [hBeds, setHBeds] = useState('10');
   const [hAdminName, setHAdminName] = useState('');
   const [hAdminEmail, setHAdminEmail] = useState('');
@@ -137,8 +145,24 @@ export const SuperAdminDashboard: React.FC = () => {
   const [registrations, setRegistrations] = useState<any[]>([]);
   const [registrationsLoading, setRegistrationsLoading] = useState(false);
   const [regFilter, setRegFilter] = useState<'ALL' | 'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
-  const [rejectModal, setRejectModal] = useState<{ id: string; hospitalName: string } | null>(null);
-  const [rejectionReason, setRejectionReason] = useState('');
+  // Confirmation Modal Configuration
+  const [confirmModalConfig, setConfirmModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    description: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    isDestructive?: boolean;
+    requireReason?: boolean;
+    reasonLabel?: string;
+    onConfirm: (reason?: string) => Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    description: '',
+    onConfirm: async () => {},
+  });
+  const [confirmActionLoading, setConfirmActionLoading] = useState(false);
 
   // Feature 3: Real-Time Activity Monitoring state
   const [activityLogs, setActivityLogs] = useState<any[]>([]);
@@ -177,17 +201,32 @@ export const SuperAdminDashboard: React.FC = () => {
     }
   };
 
-  const handleDeleteUser = async (userId: string) => {
-    if (!window.confirm('Are you absolutely sure you want to permanently delete this user account and all associated profile information?')) {
-      return;
-    }
-    try {
-      await apiFetch(`/admin/users/${userId}`, { method: 'DELETE' });
-      alert('User account deleted successfully.');
-      fetchUsers();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete user.');
-    }
+  const handleDeleteUser = (userId: string, userName?: string) => {
+    setConfirmModalConfig({
+      isOpen: true,
+      title: 'Delete User Account',
+      description: `Are you sure you want to permanently delete the user account for "${userName || userId}"? This action will remove all profile and audit records.`,
+      confirmLabel: 'Permanently Delete',
+      isDestructive: true,
+      requireReason: true,
+      reasonLabel: 'Operational Rationale for Account Deletion',
+      onConfirm: async (reason?: string) => {
+        setConfirmActionLoading(true);
+        try {
+          await apiFetch(`/admin/users/${userId}`, {
+            method: 'DELETE',
+            body: JSON.stringify({ reason }),
+          });
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          fetchUsers();
+          fetchActivityLogs();
+        } catch (err: any) {
+          alert(err.message || 'Failed to delete user.');
+        } finally {
+          setConfirmActionLoading(false);
+        }
+      },
+    });
   };
 
   const handleUpdateUser = async (e: React.FormEvent) => {
@@ -218,18 +257,33 @@ export const SuperAdminDashboard: React.FC = () => {
     }
   };
 
-  const handleToggleAdminStatus = async (id: string, currentStatus: boolean, adminName: string) => {
+  const handleToggleAdminStatus = (id: string, currentStatus: boolean, adminName: string) => {
     const action = currentStatus ? 'deactivate' : 'reactivate';
-    if (!window.confirm(`Are you sure you want to ${action} the hospital admin account for "${adminName}"?`)) {
-      return;
-    }
-    try {
-      await apiFetch(`/admin/hospital-admins/${id}/toggle-status`, { method: 'PATCH' });
-      fetchHospitalAdmins();
-      fetchActivityLogs();
-    } catch (err: any) {
-      alert(err.message || `Failed to ${action} hospital admin.`);
-    }
+    setConfirmModalConfig({
+      isOpen: true,
+      title: `${action.toUpperCase()} Hospital Administrator`,
+      description: `Are you sure you want to ${action} the hospital administrator account for "${adminName}"?`,
+      confirmLabel: `Confirm ${action}`,
+      isDestructive: currentStatus,
+      requireReason: currentStatus,
+      reasonLabel: `Audit Rationale for ${action}`,
+      onConfirm: async (reason?: string) => {
+        setConfirmActionLoading(true);
+        try {
+          await apiFetch(`/admin/hospital-admins/${id}/toggle-status`, {
+            method: 'PATCH',
+            body: JSON.stringify({ reason }),
+          });
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          fetchHospitalAdmins();
+          fetchActivityLogs();
+        } catch (err: any) {
+          alert(err.message || `Failed to ${action} hospital admin.`);
+        } finally {
+          setConfirmActionLoading(false);
+        }
+      },
+    });
   };
 
   const handleSaveEditAdmin = async (e: React.FormEvent) => {
@@ -262,38 +316,57 @@ export const SuperAdminDashboard: React.FC = () => {
     }
   };
 
-  const handleApproveRegistration = async (id: string, hospitalName: string) => {
-    if (!window.confirm(`Approve registration for "${hospitalName}"? This will create an active Hospital Administrator account and assign initial hospital beds.`)) {
-      return;
-    }
-    try {
-      const res = await apiFetch(`/admin/hospital-registrations/${id}/approve`, { method: 'POST' });
-      alert(res.message || 'Hospital approved successfully!');
-      fetchRegistrations();
-      fetchHospitalAdmins();
-      fetchTelemetry();
-      fetchActivityLogs();
-    } catch (err: any) {
-      alert(err.message || 'Failed to approve hospital registration.');
-    }
+  const handleApproveRegistration = (id: string, hospitalName: string) => {
+    setConfirmModalConfig({
+      isOpen: true,
+      title: 'Approve Hospital Onboarding',
+      description: `Approve registration for "${hospitalName}"? This will activate the facility and provision an operational hospital admin account.`,
+      confirmLabel: 'Approve & Activate Facility',
+      isDestructive: false,
+      onConfirm: async () => {
+        setConfirmActionLoading(true);
+        try {
+          const res = await apiFetch(`/admin/hospital-registrations/${id}/approve`, { method: 'POST' });
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          fetchRegistrations();
+          fetchHospitalAdmins();
+          fetchTelemetry();
+          fetchActivityLogs();
+        } catch (err: any) {
+          alert(err.message || 'Failed to approve hospital registration.');
+        } finally {
+          setConfirmActionLoading(false);
+        }
+      },
+    });
   };
 
-  const handleRejectRegistration = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!rejectModal) return;
-    try {
-      await apiFetch(`/admin/hospital-registrations/${rejectModal.id}/reject`, {
-        method: 'POST',
-        body: JSON.stringify({ reason: rejectionReason }),
-      });
-      alert(`Registration for "${rejectModal.hospitalName}" marked as rejected.`);
-      setRejectModal(null);
-      setRejectionReason('');
-      fetchRegistrations();
-      fetchActivityLogs();
-    } catch (err: any) {
-      alert(err.message || 'Failed to reject registration.');
-    }
+  const promptRejectRegistration = (id: string, hospitalName: string) => {
+    setConfirmModalConfig({
+      isOpen: true,
+      title: 'Reject Hospital Application',
+      description: `Are you sure you want to reject the application for "${hospitalName}"? You must provide an audit reason that will be logged and communicated.`,
+      confirmLabel: 'Reject Application',
+      isDestructive: true,
+      requireReason: true,
+      reasonLabel: 'Mandatory Rejection Rationale',
+      onConfirm: async (reason?: string) => {
+        setConfirmActionLoading(true);
+        try {
+          await apiFetch(`/admin/hospital-registrations/${id}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ reason }),
+          });
+          setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+          fetchRegistrations();
+          fetchActivityLogs();
+        } catch (err: any) {
+          alert(err.message || 'Failed to reject registration.');
+        } finally {
+          setConfirmActionLoading(false);
+        }
+      },
+    });
   };
 
   // Fetch Activity Logs (Feature 3)
@@ -457,6 +530,68 @@ export const SuperAdminDashboard: React.FC = () => {
         {/* Sidebar Nav */}
         <aside className="w-full md:w-64 flex flex-row md:flex-col gap-2 shrink-0 overflow-x-auto pb-2 md:pb-0">
           <button
+            onClick={() => setActiveTab('COMMAND_CENTER')}
+            className={`flex-1 md:flex-none flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-300 ${
+              activeTab === 'COMMAND_CENTER'
+                ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
+                : 'bg-slate-950 text-slate-400 hover:bg-slate-850'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <Radio className="w-4 h-4 text-rose-300 animate-pulse" />
+              <span>Command Center</span>
+            </div>
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+          </button>
+          <button
+            onClick={() => setActiveTab('ANALYTICS')}
+            className={`flex-1 md:flex-none flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-300 ${
+              activeTab === 'ANALYTICS'
+                ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
+                : 'bg-slate-950 text-slate-400 hover:bg-slate-850'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <BarChart3 className="w-4 h-4 text-rose-300" />
+              <span>Operations Analytics</span>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+              Audited
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab('DIRECTORY')}
+            className={`flex-1 md:flex-none flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-300 ${
+              activeTab === 'DIRECTORY'
+                ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
+                : 'bg-slate-950 text-slate-400 hover:bg-slate-850'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <MapPin className="w-4 h-4 text-emerald-400" />
+              <span>Nagpur Directory</span>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+              Pilot
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab('ACTIVATION')}
+            className={`flex-1 md:flex-none flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-300 ${
+              activeTab === 'ACTIVATION'
+                ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
+                : 'bg-slate-950 text-slate-400 hover:bg-slate-850'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <ShieldCheck className="w-4 h-4 text-rose-400" />
+              <span>Network Activation</span>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold bg-rose-500/20 text-rose-400 border border-rose-500/30">
+              Audited
+            </span>
+          </button>
+          <button
             onClick={() => setActiveTab('TELEMETRY')}
             className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-semibold transition-all duration-300 ${
               activeTab === 'TELEMETRY'
@@ -554,6 +689,33 @@ export const SuperAdminDashboard: React.FC = () => {
             </div>
           ) : (
             <>
+              {/* Command Center Operations Tab (Prompt 25) */}
+              {activeTab === 'COMMAND_CENTER' && (
+                <CommandCenterView
+                  apiFetch={apiFetch}
+                  socket={socket}
+                  onOpenConfirmModal={setConfirmModalConfig}
+                />
+              )}
+
+              {/* Operations Analytics & Reporting Tab (Prompt 27) */}
+              {activeTab === 'ANALYTICS' && (
+                <AnalyticsReportingView />
+              )}
+
+              {/* Nagpur Healthcare & Ambulance Directory Tab (Prompt 29) */}
+              {activeTab === 'DIRECTORY' && (
+                <NagpurDirectoryManagement
+                  apiFetch={apiFetch}
+                  partnerHospitals={hospitals}
+                />
+              )}
+
+              {/* Real-World Network Activation Console (Prompt 30) */}
+              {activeTab === 'ACTIVATION' && (
+                <NetworkActivationConsole apiFetch={apiFetch} />
+              )}
+
               {/* Telemetry Tab */}
               {activeTab === 'TELEMETRY' && (
                 <div className="space-y-6">
@@ -585,40 +747,45 @@ export const SuperAdminDashboard: React.FC = () => {
                   <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl space-y-4">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">System-Wide Live Map</h3>
                     <div className="h-[400px] w-full rounded-2xl overflow-hidden relative">
-                      <MapContainer center={[37.7749, -122.4194]} zoom={13} scrollWheelZoom={true}>
+                      <MapContainer center={[21.1458, 79.0882]} zoom={12} scrollWheelZoom={true}>
                         <TileLayer
-                          attribution='&copy; CARTO'
-                          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" // Dark theme map
+                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                         />
                         
-                        {/* Loop hospitals */}
-                        {hospitals.map((h: any) => (
-                          <Marker key={h.id} position={[h.lat, h.lng]} icon={hospitalIcon}>
-                            <Popup>
-                              <div className="text-slate-900">
-                                <h4 className="font-bold text-sm">{h.name}</h4>
-                                <p className="text-2xs text-slate-500 mt-1">Beds: {h.availableBeds} Available</p>
-                              </div>
-                            </Popup>
-                          </Marker>
-                        ))}
+                        {/* Loop hospitals with coordinate validation */}
+                        {hospitals
+                          .filter((h: any) => typeof h.lat === 'number' && typeof h.lng === 'number' && !isNaN(h.lat) && !isNaN(h.lng))
+                          .map((h: any) => (
+                            <Marker key={h.id} position={[h.lat, h.lng]} icon={hospitalIcon}>
+                              <Popup>
+                                <div className="text-slate-900 font-sans">
+                                  <h4 className="font-bold text-sm">{h.name}</h4>
+                                  <p className="text-2xs text-slate-500 mt-1">Beds: {h.availableBeds} Available</p>
+                                  {h.contactNumber && <p className="text-2xs text-blue-600 mt-0.5">📞 {h.contactNumber}</p>}
+                                </div>
+                              </Popup>
+                            </Marker>
+                          ))}
 
-                        {/* Loop drivers */}
-                        {drivers.map((d: any) => (
-                          <Marker
-                            key={d.id}
-                            position={[d.currentLat, d.currentLng]}
-                            icon={d.isAvailable ? driverIconOnline : driverIconOffline}
-                          >
-                            <Popup>
-                              <div className="text-slate-900">
-                                <h4 className="font-bold text-sm">{d.driver?.name}</h4>
-                                <p className="text-2xs text-slate-500 mt-1">Vehicle: {d.vehicleNumber} ({d.ambulanceType.replace(/_/g, ' ')})</p>
-                                <p className="text-2xs text-slate-500 mt-0.5">Status: {d.isAvailable ? 'Online' : 'Offline/In-Trip'}</p>
-                              </div>
-                            </Popup>
-                          </Marker>
-                        ))}
+                        {/* Loop drivers with coordinate validation */}
+                        {drivers
+                          .filter((d: any) => typeof d.currentLat === 'number' && typeof d.currentLng === 'number' && !isNaN(d.currentLat) && !isNaN(d.currentLng))
+                          .map((d: any) => (
+                            <Marker
+                              key={d.id}
+                              position={[d.currentLat, d.currentLng]}
+                              icon={d.isAvailable ? driverIconOnline : driverIconOffline}
+                            >
+                              <Popup>
+                                <div className="text-slate-900 font-sans">
+                                  <h4 className="font-bold text-sm">{d.driver?.name || 'Assigned Driver'}</h4>
+                                  <p className="text-2xs text-slate-500 mt-1">Vehicle: {d.vehicleNumber} ({d.ambulanceType ? d.ambulanceType.replace(/_/g, ' ') : 'Ambulance'})</p>
+                                  <p className="text-2xs text-slate-500 mt-0.5">Status: {d.isAvailable ? 'Online / Available' : 'Offline / In-Trip'}</p>
+                                </div>
+                              </Popup>
+                            </Marker>
+                          ))}
                       </MapContainer>
                     </div>
                   </div>
@@ -655,7 +822,7 @@ export const SuperAdminDashboard: React.FC = () => {
                               </td>
                               <td className="py-3.5 font-semibold text-slate-400">{r.etaMinutes || '0'} mins</td>
                               <td className="py-3.5 text-3xs font-semibold text-slate-500">
-                                {new Date(r.createdAt).toLocaleString()}
+                                {formatIndianDateTime(r.createdAt)}
                               </td>
                             </tr>
                           ))}
@@ -1226,7 +1393,7 @@ export const SuperAdminDashboard: React.FC = () => {
                                 {reg.status}
                               </span>
                               <h3 className="text-base font-bold text-white tracking-tight">{reg.hospitalName}</h3>
-                              <p className="text-3xs text-slate-500 font-mono mt-0.5">Applied: {new Date(reg.createdAt).toLocaleDateString()}</p>
+                              <p className="text-3xs text-slate-500 font-mono mt-0.5">Applied: {formatIndianDateTime(reg.createdAt)}</p>
                             </div>
                             <div className="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400">
                               <Building className="w-4 h-4 text-emerald-400" />
@@ -1281,10 +1448,7 @@ export const SuperAdminDashboard: React.FC = () => {
                                 <span>Approve Facility</span>
                               </button>
                               <button
-                                onClick={() => {
-                                  setRejectModal({ id: reg.id, hospitalName: reg.hospitalName });
-                                  setRejectionReason('');
-                                }}
+                                onClick={() => promptRejectRegistration(reg.id, reg.hospitalName)}
                                 className="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1"
                               >
                                 <XCircle className="w-3.5 h-3.5" />
@@ -1393,7 +1557,7 @@ export const SuperAdminDashboard: React.FC = () => {
 
                             <div className="flex items-center gap-3 self-end sm:self-center">
                               <span className="text-3xs text-slate-500 font-mono">
-                                {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                {formatIndianDateTime(log.timestamp)}
                               </span>
                               {log.metadata && (
                                 <button
@@ -1536,7 +1700,7 @@ export const SuperAdminDashboard: React.FC = () => {
                                       <Edit2 className="w-3.5 h-3.5" />
                                     </button>
                                     <button
-                                      onClick={() => handleDeleteUser(u.id)}
+                                      onClick={() => handleDeleteUser(u.id, u.name)}
                                       className="p-1.5 bg-rose-950/20 hover:bg-rose-900/50 text-rose-455 hover:text-rose-400 rounded-lg transition-colors inline-flex cursor-pointer"
                                       title="Delete Account"
                                       disabled={u.role === 'SUPER_ADMIN'}
@@ -1848,57 +2012,20 @@ export const SuperAdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Feature 4: Reject Hospital Registration Modal */}
-      {rejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-white">Reject Application</h3>
-                <p className="text-3xs text-slate-400">Application: {rejectModal.hospitalName}</p>
-              </div>
-              <button
-                onClick={() => setRejectModal(null)}
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleRejectRegistration} className="space-y-4">
-              <div>
-                <label className="block text-3xs font-semibold text-slate-400 uppercase mb-1">
-                  Reason for Rejection (Visible to Facility)
-                </label>
-                <textarea
-                  rows={3}
-                  required
-                  value={rejectionReason}
-                  onChange={(e) => setRejectionReason(e.target.value)}
-                  placeholder="e.g. Incomplete license documentation or contact number unreachable..."
-                  className="w-full bg-slate-950 border border-slate-850 p-3 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-rose-500"
-                />
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRejectModal(null)}
-                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-rose-600/20 transition-colors cursor-pointer"
-                >
-                  Confirm Rejection
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Feature 4: Accessible Confirmation Modal for Destructive/High-Impact Actions */}
+      <ConfirmationModal
+        isOpen={confirmModalConfig.isOpen}
+        title={confirmModalConfig.title}
+        description={confirmModalConfig.description}
+        confirmLabel={confirmModalConfig.confirmLabel}
+        cancelLabel={confirmModalConfig.cancelLabel}
+        isDestructive={confirmModalConfig.isDestructive}
+        loading={confirmActionLoading}
+        requireReason={confirmModalConfig.requireReason}
+        reasonLabel={confirmModalConfig.reasonLabel}
+        onConfirm={confirmModalConfig.onConfirm}
+        onCancel={() => setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }))}
+      />
 
       {/* Feature 3: Activity Log Payload Inspector Modal */}
       {selectedLogPayload && (

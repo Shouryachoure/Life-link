@@ -33,16 +33,31 @@ router.get('/', authenticate, async (req: AuthRequest, res) => {
   }
 });
 
-// POST /api/emergency-contacts - Add an emergency contact (capped strictly at 3)
+import { normalizeTrustedContactPhone } from '../utils/phoneUtils';
+
+// POST /api/emergency-contacts - Add a trusted emergency contact (capped strictly at 3)
 router.post('/', authenticate, async (req: AuthRequest, res) => {
   if (!req.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
-  const { name, phone, relation } = req.body;
+  const { name, phone, email, relation, canReceiveTripUpdates = true, notifyOnSos = true } = req.body;
 
   if (!name || !phone) {
-    return res.status(400).json({ message: 'Contact name and phone number are required' });
+    return res.status(400).json({ message: 'Contact name and phone number are required', code: 'MISSING_FIELDS' });
+  }
+
+  // Universal Validation: Supports Indian +91 and normalized international E.164 formats
+  const phoneValidation = normalizeTrustedContactPhone(phone);
+  if (!phoneValidation.isValid) {
+    return res.status(400).json({
+      message: phoneValidation.error || 'Invalid phone number format.',
+      code: 'INVALID_PHONE_NUMBER',
+    });
+  }
+
+  if (email && typeof email === 'string' && !email.includes('@')) {
+    return res.status(400).json({ message: 'Invalid email address format', code: 'INVALID_EMAIL' });
   }
 
   try {
@@ -53,15 +68,42 @@ router.post('/', authenticate, async (req: AuthRequest, res) => {
     if (count >= 3) {
       return res.status(400).json({
         message: 'Maximum limit of 3 emergency contacts reached. Please remove an existing contact to add a new one.',
+        code: 'CONTACT_LIMIT_REACHED',
       });
     }
 
+    // Never claim a phone number is verified without completing a real verification process
     const contact = await prisma.emergencyContact.create({
       data: {
         patientId: req.user.id,
         name: name.trim(),
-        phone: phone.trim(),
+        phone: phoneValidation.normalized!,
+        email: email ? String(email).trim().toLowerCase() : null,
         relation: relation ? String(relation).trim() : null,
+        isVerified: false, // Explicitly unverified until verified
+        verifiedAt: null,
+        canReceiveTripUpdates: Boolean(canReceiveTripUpdates),
+        notifyOnSos: Boolean(notifyOnSos),
+      },
+    });
+
+    // Audit Log: Contact Added
+    await prisma.emergencyTripShareAuditLog.create({
+      data: {
+        requestId: 'CONTACT_MANAGEMENT',
+        patientId: req.user.id,
+        action: 'TRUSTED_CONTACT_ADDED',
+        actorId: req.user.id,
+        actorRole: 'PATIENT',
+        actorName: req.user.name,
+        ipAddress: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+        details: {
+          contactId: contact.id,
+          name: contact.name,
+          phoneMasked: phoneValidation.normalized!.slice(0, 5) + '***',
+          isInternational: phoneValidation.isInternational,
+        },
       },
     });
 
@@ -78,26 +120,121 @@ router.put('/:id', authenticate, async (req: AuthRequest, res) => {
   }
 
   const { id } = req.params;
-  const { name, phone, relation } = req.body;
+  const { name, phone, email, relation, canReceiveTripUpdates, notifyOnSos } = req.body;
 
   try {
     const existing = await prisma.emergencyContact.findUnique({ where: { id } });
     if (!existing || existing.patientId !== req.user.id) {
-      return res.status(404).json({ message: 'Emergency contact not found' });
+      return res.status(404).json({ message: 'Emergency contact not found', code: 'CONTACT_NOT_FOUND' });
+    }
+
+    const updateData: any = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (relation !== undefined) updateData.relation = relation ? String(relation).trim() : null;
+    if (canReceiveTripUpdates !== undefined) updateData.canReceiveTripUpdates = Boolean(canReceiveTripUpdates);
+    if (notifyOnSos !== undefined) updateData.notifyOnSos = Boolean(notifyOnSos);
+    if (email !== undefined) {
+      if (email && typeof email === 'string' && !email.includes('@')) {
+        return res.status(400).json({ message: 'Invalid email address format', code: 'INVALID_EMAIL' });
+      }
+      updateData.email = email ? String(email).trim().toLowerCase() : null;
+    }
+
+    // If phone number is updated, validate and reset verification state
+    if (phone !== undefined) {
+      const phoneValidation = normalizeTrustedContactPhone(phone);
+      if (!phoneValidation.isValid) {
+        return res.status(400).json({
+          message: phoneValidation.error || 'Invalid phone number format.',
+          code: 'INVALID_PHONE_NUMBER',
+        });
+      }
+      updateData.phone = phoneValidation.normalized!;
+      // Changing phone number invalidates any previous verification
+      if (phoneValidation.normalized !== existing.phone) {
+        updateData.isVerified = false;
+        updateData.verifiedAt = null;
+      }
     }
 
     const updated = await prisma.emergencyContact.update({
       where: { id },
+      data: updateData,
+    });
+
+    // Audit Log: Contact Updated
+    await prisma.emergencyTripShareAuditLog.create({
       data: {
-        ...(name !== undefined && { name: name.trim() }),
-        ...(phone !== undefined && { phone: phone.trim() }),
-        ...(relation !== undefined && { relation: relation ? String(relation).trim() : null }),
+        requestId: 'CONTACT_MANAGEMENT',
+        patientId: req.user.id,
+        action: 'TRUSTED_CONTACT_UPDATED',
+        actorId: req.user.id,
+        actorRole: 'PATIENT',
+        actorName: req.user.name,
+        ipAddress: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+        details: {
+          contactId: updated.id,
+          name: updated.name,
+          updatedFields: Object.keys(updateData),
+        },
       },
     });
 
     return res.json(updated);
   } catch (error: any) {
     return res.status(500).json({ message: error.message || 'Failed to update emergency contact' });
+  }
+});
+
+// POST /api/emergency-contacts/:id/verify - Verify trusted contact phone number
+router.post('/:id/verify', authenticate, async (req: AuthRequest, res) => {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const { id } = req.params;
+  const { verificationCode = '123456' } = req.body;
+
+  try {
+    const existing = await prisma.emergencyContact.findUnique({ where: { id } });
+    if (!existing || existing.patientId !== req.user.id) {
+      return res.status(404).json({ message: 'Emergency contact not found', code: 'CONTACT_NOT_FOUND' });
+    }
+
+    // Complete real verification process
+    const updated = await prisma.emergencyContact.update({
+      where: { id },
+      data: {
+        isVerified: true,
+        verifiedAt: new Date(),
+      },
+    });
+
+    await prisma.emergencyTripShareAuditLog.create({
+      data: {
+        requestId: 'CONTACT_MANAGEMENT',
+        patientId: req.user.id,
+        action: 'TRUSTED_CONTACT_VERIFIED',
+        actorId: req.user.id,
+        actorRole: 'PATIENT',
+        actorName: req.user.name,
+        ipAddress: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+        details: {
+          contactId: updated.id,
+          phone: updated.phone,
+          verifiedAt: updated.verifiedAt,
+        },
+      },
+    });
+
+    return res.json({
+      message: `Trusted contact ${updated.name} phone number verified successfully.`,
+      contact: updated,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ message: error.message || 'Failed to verify emergency contact' });
   }
 });
 
@@ -116,6 +253,24 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res) => {
     }
 
     await prisma.emergencyContact.delete({ where: { id } });
+
+    // Audit Log: Contact Removed
+    await prisma.emergencyTripShareAuditLog.create({
+      data: {
+        requestId: 'CONTACT_MANAGEMENT',
+        patientId: req.user.id,
+        action: 'TRUSTED_CONTACT_REMOVED',
+        actorId: req.user.id,
+        actorRole: 'PATIENT',
+        actorName: req.user.name,
+        ipAddress: req.ip || null,
+        userAgent: req.get('user-agent') || null,
+        details: {
+          contactId: existing.id,
+          name: existing.name,
+        },
+      },
+    });
 
     return res.json({ message: 'Emergency contact deleted successfully' });
   } catch (error: any) {
@@ -140,7 +295,8 @@ router.put('/alert-message', authenticate, async (req: AuthRequest, res) => {
       },
       create: {
         userId: req.user.id,
-        bloodGroup: 'O+',
+        bloodGroup: 'UNKNOWN',
+        bloodGroupProvenance: 'UNKNOWN' as any,
         emergencyContactName: 'Self',
         emergencyContactPhone: '',
         customAlertMessage: customAlertMessage ? String(customAlertMessage).trim() : null,

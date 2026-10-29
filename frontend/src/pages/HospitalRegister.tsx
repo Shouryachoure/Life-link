@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { getApiBaseUrl } from '../config/apiConfig';
 import { 
   Building, 
   Mail, 
@@ -82,8 +83,9 @@ export const HospitalRegister: React.FC = () => {
     }
 
     setLoading(true);
+    const apiUrl = getApiBaseUrl();
     try {
-      const response = await fetch('http://localhost:5000/api/auth/register-hospital', {
+      const response = await fetch(`${apiUrl}/auth/register-hospital`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -15,6 +15,12 @@ import SuperAdminDashboard from './pages/SuperAdminDashboard';
 import AdminLogin from './pages/AdminLogin';
 import SuperAdminLogin from './pages/SuperAdminLogin';
 import HospitalRegister from './pages/HospitalRegister';
+import Unauthorized from './pages/Unauthorized';
+import NotFound from './pages/NotFound';
+import OperatorDashboard from './pages/OperatorDashboard';
+import PublicEmergencyMedicalId from './pages/PublicEmergencyMedicalId';
+import PublicTripShare from './pages/PublicTripShare';
+import ForgotPassword from './pages/ForgotPassword';
 
 // Feature 1: Global Alt+A Shortcut for Hidden Super Admin Gateway
 const GlobalKeyboardShortcuts: React.FC = () => {
@@ -41,6 +47,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode; allowedRoles: string
   allowedRoles,
 }) => {
   const { user, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -54,14 +61,14 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode; allowedRoles: string
   }
 
   if (!user) {
-    // Route unauthenticated visitors to their designated portal
+    // Route unauthenticated visitors to their designated portal, preserving destination
     if (allowedRoles.includes('SUPER_ADMIN')) {
-      return <Navigate to="/super-admin/login" replace />;
+      return <Navigate to="/super-admin/login" state={{ from: location }} replace />;
     }
     if (allowedRoles.includes('ADMIN_HOSPITAL')) {
-      return <Navigate to="/admin/login" replace />;
+      return <Navigate to="/admin/login" state={{ from: location }} replace />;
     }
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
   if (!allowedRoles.includes(user.role)) {
@@ -70,12 +77,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode; allowedRoles: string
       return <>{children}</>;
     }
 
-    // Redirect to default home for their role
-    if (user.role === 'PATIENT') return <Navigate to="/patient" replace />;
-    if (user.role === 'DRIVER') return <Navigate to="/driver" replace />;
-    if (user.role === 'ADMIN_HOSPITAL') return <Navigate to="/hospital" replace />;
-    if (user.role === 'SUPER_ADMIN') return <Navigate to="/super-admin" replace />;
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/unauthorized" replace />;
   }
 
   return <>{children}</>;
@@ -87,10 +89,15 @@ function AppRoutes() {
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/register-hospital" element={<HospitalRegister />} />
       <Route path="/admin/login" element={<AdminLogin />} />
       <Route path="/super-admin-login" element={<SuperAdminLogin />} />
       <Route path="/super-admin/login" element={<SuperAdminLogin />} />
+      <Route path="/unauthorized" element={<Unauthorized />} />
+      <Route path="/medical-id" element={<PublicEmergencyMedicalId />} />
+      <Route path="/track-trip" element={<PublicTripShare />} />
+      <Route path="/trip-share" element={<PublicTripShare />} />
 
       <Route
         path="/patient"
@@ -154,8 +161,26 @@ function AppRoutes() {
         }
       />
 
-      {/* Redirects */}
-      <Route path="*" element={<Navigate to="/" replace />} />
+      {/* Private Operator Admin Routes */}
+      <Route
+        path="/operator"
+        element={
+          <ProtectedRoute allowedRoles={['OPERATOR_ADMIN', 'SUPER_ADMIN']}>
+            <OperatorDashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/operator/dashboard"
+        element={
+          <ProtectedRoute allowedRoles={['OPERATOR_ADMIN', 'SUPER_ADMIN']}>
+            <OperatorDashboard />
+          </ProtectedRoute>
+        }
+      />
+
+      {/* 404 Catch-All Route */}
+      <Route path="*" element={<NotFound />} />
     </Routes>
   );
 }

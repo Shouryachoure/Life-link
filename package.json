@@ -4,9 +4,19 @@
   "description": "LifeLink Emergency Dispatch System Root",
   "scripts": {
     "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --prefix backend",
     "dev:frontend": "npm run dev --prefix frontend",
-    "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\""
+    "build": "npm run build --prefix backend && npm run build --prefix frontend",
+    "build:backend": "npm run build --prefix backend",
+    "build:frontend": "npm run build --prefix frontend",
+    "type-check": "npm run type-check --prefix backend && npm run type-check --prefix frontend",
+    "lint": "npm run lint --prefix frontend",
+    "test": "npm run test --prefix backend",
+    "prisma:generate": "npm run prisma:generate --prefix backend",
+    "prisma:migrate": "npm run prisma:migrate --prefix backend",
+    "db:check": "npm run db:check --prefix backend",
+    "bootstrap:admin": "npm run bootstrap:admin --prefix backend"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

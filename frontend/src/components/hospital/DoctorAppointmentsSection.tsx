@@ -16,9 +16,15 @@ import {
   Ticket,
   Filter,
   Check,
-  AlertTriangle
+  AlertTriangle,
+  Lock,
+  Unlock,
+  History,
+  CalendarX,
+  Sliders,
 } from 'lucide-react';
 import { MEDICAL_SPECIALIZATIONS } from '../../constants/specializations';
+import { formatINR, formatIndianPhone } from '../../utils/localization';
 
 interface DoctorAppointmentsSectionProps {
   apiFetch: (url: string, options?: any) => Promise<any>;
@@ -40,7 +46,8 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
   const [docSpecialization, setDocSpecialization] = useState<string>(MEDICAL_SPECIALIZATIONS[0]);
   const [docQualifications, setDocQualifications] = useState('');
   const [docExperience, setDocExperience] = useState('5');
-  const [docFee, setDocFee] = useState('50');
+  const [docFee, setDocFee] = useState('500');
+  const [docDefaultSlotDuration, setDocDefaultSlotDuration] = useState('15');
   const [addingDoctor, setAddingDoctor] = useState(false);
   const [doctorActionMsg, setDoctorActionMsg] = useState('');
 
@@ -53,17 +60,45 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
   const [loadingRoster, setLoadingRoster] = useState(false);
   const [expandedSlotId, setExpandedSlotId] = useState<string | null>(null);
 
-  // Add Slot Modal State
+  // Add Single Slot Modal State
   const [showAddSlotModal, setShowAddSlotModal] = useState(false);
   const [slotDoctorId, setSlotDoctorId] = useState('');
   const [slotDate, setSlotDate] = useState(new Date().toISOString().split('T')[0]);
   const [slotStartTime, setSlotStartTime] = useState('09:00');
   const [slotEndTime, setSlotEndTime] = useState('10:00');
   const [slotMaxPatients, setSlotMaxPatients] = useState('5');
+  const [slotDurationMinutes, setSlotDurationMinutes] = useState('15');
   const [addingSlot, setAddingSlot] = useState(false);
   const [slotError, setSlotError] = useState('');
 
-  // Status update
+  // Batch Schedule Generator State
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [batchDoctorId, setBatchDoctorId] = useState('');
+  const [batchStartDate, setBatchStartDate] = useState(new Date().toISOString().split('T')[0]);
+  const [batchEndDate, setBatchEndDate] = useState(new Date().toISOString().split('T')[0]);
+  const [batchStartTime, setBatchStartTime] = useState('09:00');
+  const [batchEndTime, setBatchEndTime] = useState('17:00');
+  const [batchSlotDuration, setBatchSlotDuration] = useState('15');
+  const [batchMaxPatients, setBatchMaxPatients] = useState('5');
+  const [generatingSchedule, setGeneratingSchedule] = useState(false);
+  const [batchMessage, setBatchMessage] = useState('');
+
+  // Doctor Leave / Unavailable Dates Management
+  const [leaveModalDoctor, setLeaveModalDoctor] = useState<any | null>(null);
+  const [newLeaveDate, setNewLeaveDate] = useState(new Date().toISOString().split('T')[0]);
+  const [savingLeave, setSavingLeave] = useState(false);
+
+  // Slot Blocking State
+  const [blockingSlot, setBlockingSlot] = useState<any | null>(null);
+  const [blockReasonInput, setBlockReasonInput] = useState('');
+  const [savingBlock, setSavingBlock] = useState(false);
+
+  // Audit Trail Viewer Modal State
+  const [auditModalAppointmentId, setAuditModalAppointmentId] = useState<string | null>(null);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
+  // Status updating
   const [updatingAptId, setUpdatingAptId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -80,8 +115,9 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
     try {
       const data = await apiFetch('/doctors');
       setDoctors(data);
-      if (data.length > 0 && !slotDoctorId) {
-        setSlotDoctorId(data[0].id);
+      if (data.length > 0) {
+        if (!slotDoctorId) setSlotDoctorId(data[0].id);
+        if (!batchDoctorId) setBatchDoctorId(data[0].id);
       }
     } catch (err) {
       console.error('Failed to load doctors:', err);
@@ -90,7 +126,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
     }
   };
 
-  // Fetch Day's Slots Roster (Feature 3)
+  // Fetch Day's Slots Roster
   const fetchSlotsRoster = async () => {
     setLoadingRoster(true);
     try {
@@ -122,6 +158,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
           qualifications: docQualifications.trim() || undefined,
           experienceYears: parseInt(docExperience) || 0,
           consultationFee: parseFloat(docFee) || 0,
+          defaultSlotDuration: parseInt(docDefaultSlotDuration) || 15,
         }),
       });
 
@@ -150,7 +187,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
     }
   };
 
-  // Create Slot
+  // Create Single Slot
   const handleCreateSlot = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!slotDoctorId) return;
@@ -166,6 +203,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
           startTime: slotStartTime,
           endTime: slotEndTime,
           maxPatients: parseInt(slotMaxPatients) || 5,
+          slotDurationMinutes: parseInt(slotDurationMinutes) || 15,
         }),
       });
 
@@ -175,6 +213,114 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
       setSlotError(err.message || 'Failed to create slot');
     } finally {
       setAddingSlot(false);
+    }
+  };
+
+  // Batch Generate Schedule
+  const handleBatchGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!batchDoctorId) return;
+
+    setGeneratingSchedule(true);
+    setBatchMessage('');
+
+    try {
+      const res = await apiFetch(`/doctors/${batchDoctorId}/schedule`, {
+        method: 'POST',
+        body: JSON.stringify({
+          startDate: batchStartDate,
+          endDate: batchEndDate,
+          startTime: batchStartTime,
+          endTime: batchEndTime,
+          slotDurationMinutes: parseInt(batchSlotDuration) || 15,
+          maxPatients: parseInt(batchMaxPatients) || 5,
+        }),
+      });
+
+      setBatchMessage(`Generated ${res.slotsCreated} slots successfully! (Skipped ${res.slotsSkipped} duplicates/leaves)`);
+      setTimeout(() => {
+        setShowBatchModal(false);
+        setBatchMessage('');
+        fetchSlotsRoster();
+      }, 1500);
+    } catch (err: any) {
+      alert(err.message || 'Failed to batch generate schedule');
+    } finally {
+      setGeneratingSchedule(false);
+    }
+  };
+
+  // Toggle Slot Block/Unblock
+  const handleToggleBlockSlot = async () => {
+    if (!blockingSlot) return;
+    setSavingBlock(true);
+    const newBlockedState = !blockingSlot.isBlocked;
+
+    try {
+      await apiFetch(`/doctors/slots/${blockingSlot.id}/block`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          isBlocked: newBlockedState,
+          reason: newBlockedState ? (blockReasonInput.trim() || 'Blocked by hospital administration') : undefined,
+        }),
+      });
+
+      setBlockingSlot(null);
+      setBlockReasonInput('');
+      fetchSlotsRoster();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update slot blocking state');
+    } finally {
+      setSavingBlock(false);
+    }
+  };
+
+  // Manage Doctor Unavailable Dates
+  const handleAddUnavailableDate = async () => {
+    if (!leaveModalDoctor || !newLeaveDate) return;
+    setSavingLeave(true);
+    const currentDates: string[] = leaveModalDoctor.unavailableDates || [];
+    if (currentDates.includes(newLeaveDate)) {
+      alert('This date is already marked as unavailable.');
+      setSavingLeave(false);
+      return;
+    }
+
+    const updated = [...currentDates, newLeaveDate].sort();
+    try {
+      await apiFetch(`/doctors/${leaveModalDoctor.id}/unavailable-dates`, {
+        method: 'PUT',
+        body: JSON.stringify({ unavailableDates: updated }),
+      });
+
+      setLeaveModalDoctor({ ...leaveModalDoctor, unavailableDates: updated });
+      fetchDoctors();
+      fetchSlotsRoster();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update doctor leaves');
+    } finally {
+      setSavingLeave(false);
+    }
+  };
+
+  const handleRemoveUnavailableDate = async (dateToRemove: string) => {
+    if (!leaveModalDoctor) return;
+    setSavingLeave(true);
+    const updated = (leaveModalDoctor.unavailableDates || []).filter((d: string) => d !== dateToRemove);
+
+    try {
+      await apiFetch(`/doctors/${leaveModalDoctor.id}/unavailable-dates`, {
+        method: 'PUT',
+        body: JSON.stringify({ unavailableDates: updated }),
+      });
+
+      setLeaveModalDoctor({ ...leaveModalDoctor, unavailableDates: updated });
+      fetchDoctors();
+      fetchSlotsRoster();
+    } catch (err: any) {
+      alert(err.message || 'Failed to remove unavailable date');
+    } finally {
+      setSavingLeave(false);
     }
   };
 
@@ -191,19 +337,44 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
     }
   };
 
-  // Update Appointment Status (e.g. COMPLETED or CANCELLED)
-  const handleUpdateAppointmentStatus = async (appointmentId: string, status: string) => {
+  // Update Appointment Status
+  const handleUpdateAppointmentStatus = async (appointmentId: string, status: string, reason?: string) => {
     setUpdatingAptId(appointmentId);
     try {
-      await apiFetch(`/appointments/${appointmentId}/status`, {
-        method: 'PUT',
-        body: JSON.stringify({ status }),
-      });
+      if (status === 'CONFIRMED') {
+        await apiFetch(`/appointments/${appointmentId}/confirm`, { method: 'PUT' });
+      } else if (status === 'CANCELLED') {
+        const cancelReason = reason || prompt('Please enter cancellation reason:') || 'Cancelled by hospital staff';
+        await apiFetch(`/appointments/${appointmentId}/cancel`, {
+          method: 'PUT',
+          body: JSON.stringify({ reason: cancelReason }),
+        });
+      } else {
+        await apiFetch(`/appointments/${appointmentId}/status`, {
+          method: 'PUT',
+          body: JSON.stringify({ status, reason: reason || `Updated to ${status} by hospital staff` }),
+        });
+      }
       fetchSlotsRoster();
     } catch (err: any) {
       alert(err.message || 'Failed to update appointment');
     } finally {
       setUpdatingAptId(null);
+    }
+  };
+
+  // View Audit Trail
+  const handleViewAuditTrail = async (appointmentId: string) => {
+    setAuditModalAppointmentId(appointmentId);
+    setLoadingAudit(true);
+    setAuditLogs([]);
+    try {
+      const res = await apiFetch(`/appointments/${appointmentId}/audit-trail`);
+      setAuditLogs(res.auditLogs || []);
+    } catch (err: any) {
+      console.error('Failed to load audit trail:', err);
+    } finally {
+      setLoadingAudit(false);
     }
   };
 
@@ -217,10 +388,10 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
           </div>
           <div>
             <h3 className="text-base font-black text-slate-900 dark:text-white">
-              Doctors & Outpatient Appointment Roster
+              Doctors & OPD Queue Reliability
             </h3>
             <span className="text-2xs text-slate-500 dark:text-slate-400">
-              Manage doctor specialists, configure hourly caps, and view booked patient queues
+              Manage doctor specialists, configure discrete appointment slots, block unavailable periods, and track live queues
             </span>
           </div>
         </div>
@@ -250,12 +421,12 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
       </div>
 
       {/* -------------------------------------------------------------
-          SUBTAB 1: SLOTS ROSTER (Feature 3)
+          SUBTAB 1: SLOTS ROSTER
           ------------------------------------------------------------- */}
       {subTab === 'SLOTS_ROSTER' && (
         <div className="space-y-6">
-          {/* Controls Bar: Date, Doctor Filter, + Add Slot */}
-          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+          {/* Controls Bar: Date, Doctor Filter, + Batch Generate, + Add Slot */}
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-3">
               {/* Date selector */}
               <div className="flex items-center gap-2">
@@ -294,14 +465,25 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
               </button>
             </div>
 
-            {/* + Add Slot Button */}
-            <button
-              onClick={() => setShowAddSlotModal(true)}
-              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 flex items-center gap-2 shrink-0 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Create Time Slot</span>
-            </button>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              {/* Batch Generate Button */}
+              <button
+                onClick={() => setShowBatchModal(true)}
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Batch Schedule</span>
+              </button>
+
+              {/* + Add Slot Button */}
+              <button
+                onClick={() => setShowAddSlotModal(true)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 flex items-center gap-2 shrink-0 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Create Time Slot</span>
+              </button>
+            </div>
           </div>
 
           {/* Slots Table */}
@@ -312,12 +494,21 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
           ) : slotsRoster.length === 0 ? (
             <div className="py-12 text-center text-xs text-slate-400 bg-white dark:bg-slate-950 rounded-3xl border border-slate-200 dark:border-slate-800 space-y-2">
               <p>No appointment slots scheduled for {selectedDate}.</p>
-              <button
-                onClick={() => setShowAddSlotModal(true)}
-                className="text-emerald-500 font-bold hover:underline cursor-pointer"
-              >
-                + Create a slot for today
-              </button>
+              <div className="flex justify-center gap-3">
+                <button
+                  onClick={() => setShowAddSlotModal(true)}
+                  className="text-emerald-500 font-bold hover:underline cursor-pointer"
+                >
+                  + Create a slot for today
+                </button>
+                <span>·</span>
+                <button
+                  onClick={() => setShowBatchModal(true)}
+                  className="text-emerald-500 font-bold hover:underline cursor-pointer"
+                >
+                  Batch generate weekly slots
+                </button>
+              </div>
             </div>
           ) : (
             <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl overflow-hidden shadow-sm">
@@ -327,6 +518,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                     <tr>
                       <th className="py-3 px-4">Doctor & Specialization</th>
                       <th className="py-3 px-4">Time Window</th>
+                      <th className="py-3 px-4 text-center">Status</th>
                       <th className="py-3 px-4 text-center">Capacity</th>
                       <th className="py-3 px-4 text-center">Booked</th>
                       <th className="py-3 px-4 text-center">Remaining</th>
@@ -337,10 +529,11 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                     {slotsRoster.map((slot) => {
                       const isExpanded = expandedSlotId === slot.id;
                       const hasPatients = slot.patients && slot.patients.length > 0;
+                      const isBlocked = slot.isBlocked;
 
                       return (
                         <React.Fragment key={slot.id}>
-                          <tr className="hover:bg-slate-50/70 dark:hover:bg-slate-900/40 transition-colors">
+                          <tr className={`transition-colors ${isBlocked ? 'bg-amber-500/5' : 'hover:bg-slate-50/70 dark:hover:bg-slate-900/40'}`}>
                             <td className="py-3.5 px-4 font-bold text-slate-900 dark:text-white">
                               <div>
                                 <span>{slot.doctorName}</span>
@@ -351,6 +544,19 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                             </td>
                             <td className="py-3.5 px-4 font-mono font-semibold text-slate-600 dark:text-slate-300">
                               {slot.startTime} - {slot.endTime}
+                            </td>
+                            <td className="py-3.5 px-4 text-center">
+                              {isBlocked ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[10px] font-black">
+                                  <Lock className="w-3 h-3" />
+                                  BLOCKED
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-black">
+                                  <Check className="w-3 h-3" />
+                                  ACTIVE
+                                </span>
+                              )}
                             </td>
                             <td className="py-3.5 px-4 text-center font-bold">
                               <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
@@ -363,7 +569,11 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                               </span>
                             </td>
                             <td className="py-3.5 px-4 text-center font-bold">
-                              {slot.remaining > 0 ? (
+                              {isBlocked ? (
+                                <span className="text-3xs text-amber-600 dark:text-amber-400 font-semibold">
+                                  {slot.blockedReason || 'Blocked'}
+                                </span>
+                              ) : slot.remaining > 0 ? (
                                 <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                                   {slot.remaining} Available
                                 </span>
@@ -374,7 +584,23 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                               )}
                             </td>
                             <td className="py-3.5 px-4 text-right">
-                              <div className="flex items-center justify-end gap-2">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {/* Block/Unblock toggle */}
+                                <button
+                                  onClick={() => {
+                                    setBlockingSlot(slot);
+                                    setBlockReasonInput(slot.blockedReason || '');
+                                  }}
+                                  className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                    isBlocked
+                                      ? 'text-amber-600 bg-amber-500/10 hover:bg-amber-500/20'
+                                      : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30'
+                                  }`}
+                                  title={isBlocked ? 'Unblock Slot' : 'Block Slot'}
+                                >
+                                  {isBlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                                </button>
+
                                 <button
                                   onClick={() => setExpandedSlotId(isExpanded ? null : slot.id)}
                                   className={`px-2.5 py-1 rounded-lg text-2xs font-bold transition-colors flex items-center gap-1 cursor-pointer ${
@@ -386,6 +612,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                                   <span>{slot.booked} Patient{slot.booked !== 1 ? 's' : ''}</span>
                                   {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                                 </button>
+
                                 {slot.booked === 0 && (
                                   <button
                                     onClick={() => handleDeleteSlot(slot.id)}
@@ -399,10 +626,10 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                             </td>
                           </tr>
 
-                          {/* Expandable Row Revealing Booked Patient Details */}
+                          {/* Expandable Row Revealing Booked Patient Details & Actions */}
                           {isExpanded && (
                             <tr>
-                              <td colSpan={6} className="bg-slate-50/90 dark:bg-slate-900/80 p-4 border-t border-b border-slate-200 dark:border-slate-800">
+                              <td colSpan={7} className="bg-slate-50/90 dark:bg-slate-900/80 p-4 border-t border-b border-slate-200 dark:border-slate-800">
                                 {!hasPatients ? (
                                   <div className="text-center py-4 text-3xs text-slate-400 font-semibold">
                                     No patients booked for this time slot yet.
@@ -416,7 +643,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                                       {slot.patients.map((pat: any) => (
                                         <div
                                           key={pat.appointmentId}
-                                          className="p-3.5 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between space-y-2"
+                                          className="p-3.5 rounded-2xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between space-y-2.5"
                                         >
                                           <div className="flex items-start justify-between">
                                             <div className="flex items-center gap-2.5">
@@ -428,32 +655,48 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                                                   {pat.patientName}
                                                 </h5>
                                                 <p className="text-3xs text-slate-400 font-mono">
-                                                  {pat.patientPhone}
+                                                  {formatIndianPhone(pat.patientPhone)}
                                                 </p>
                                               </div>
                                             </div>
 
-                                            <span
-                                              className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase ${
-                                                pat.status === 'COMPLETED'
-                                                  ? 'bg-blue-500/10 text-blue-500'
-                                                  : pat.status === 'CANCELLED'
-                                                  ? 'bg-rose-500/10 text-rose-500'
-                                                  : 'bg-emerald-500/10 text-emerald-500'
-                                              }`}
-                                            >
-                                              {pat.status}
-                                            </span>
+                                            <div className="flex items-center gap-1.5">
+                                              <span
+                                                className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase ${
+                                                  pat.status === 'COMPLETED'
+                                                    ? 'bg-blue-500/10 text-blue-500'
+                                                    : pat.status === 'CANCELLED' || pat.status === 'NO_SHOW'
+                                                    ? 'bg-rose-500/10 text-rose-500'
+                                                    : pat.status === 'CHECKED_IN' || pat.status === 'IN_CONSULTATION'
+                                                    ? 'bg-purple-500/10 text-purple-500'
+                                                    : 'bg-emerald-500/10 text-emerald-500'
+                                                }`}
+                                              >
+                                                {pat.status}
+                                              </span>
+
+                                              <button
+                                                onClick={() => handleViewAuditTrail(pat.appointmentId)}
+                                                className="p-1 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                                title="View Audit Trail"
+                                              >
+                                                <History className="w-3.5 h-3.5" />
+                                              </button>
+                                            </div>
                                           </div>
 
                                           <div className="grid grid-cols-2 gap-2 text-3xs text-slate-500 pt-1 border-t border-slate-100 dark:border-slate-850">
                                             <div>
-                                              <span className="text-slate-400">Blood Group:</span>{' '}
-                                              <span className="font-bold text-slate-700 dark:text-slate-300">{pat.bloodGroup}</span>
+                                              <span className="text-slate-400">Pass Token:</span>{' '}
+                                              <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                                                {pat.tokenString || `#${pat.tokenNumber}`}
+                                              </span>
                                             </div>
                                             <div>
-                                              <span className="text-slate-400">Allergies:</span>{' '}
-                                              <span className="font-bold text-slate-700 dark:text-slate-300">{pat.allergies}</span>
+                                              <span className="text-slate-400">Blood Group:</span>{' '}
+                                              <span className="font-bold text-slate-700 dark:text-slate-300">
+                                                {pat.bloodGroup || 'N/A'}
+                                              </span>
                                             </div>
                                           </div>
 
@@ -463,25 +706,67 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                                             </div>
                                           )}
 
-                                          {/* Status Action Buttons */}
-                                          {pat.status === 'BOOKED' && (
-                                            <div className="flex gap-2 pt-1">
+                                          {/* State Transition Actions */}
+                                          <div className="flex gap-1.5 pt-1 border-t border-slate-100 dark:border-slate-850 flex-wrap">
+                                            {pat.status === 'BOOKED' && (
+                                              <button
+                                                onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'CONFIRMED')}
+                                                disabled={updatingAptId === pat.appointmentId}
+                                                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-3xs font-bold transition-colors cursor-pointer"
+                                              >
+                                                Confirm Booking
+                                              </button>
+                                            )}
+
+                                            {(pat.status === 'BOOKED' || pat.status === 'CONFIRMED') && (
+                                              <button
+                                                onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'CHECKED_IN')}
+                                                disabled={updatingAptId === pat.appointmentId}
+                                                className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-3xs font-bold transition-colors cursor-pointer"
+                                              >
+                                                Check In
+                                              </button>
+                                            )}
+
+                                            {pat.status === 'CHECKED_IN' && (
+                                              <button
+                                                onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'IN_CONSULTATION')}
+                                                disabled={updatingAptId === pat.appointmentId}
+                                                className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-3xs font-bold transition-colors cursor-pointer"
+                                              >
+                                                In Consultation
+                                              </button>
+                                            )}
+
+                                            {(pat.status === 'CHECKED_IN' || pat.status === 'IN_CONSULTATION') && (
                                               <button
                                                 onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'COMPLETED')}
                                                 disabled={updatingAptId === pat.appointmentId}
-                                                className="flex-1 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold transition-colors cursor-pointer"
+                                                className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-3xs font-bold transition-colors cursor-pointer"
                                               >
-                                                Mark Completed
+                                                Complete
                                               </button>
-                                              <button
-                                                onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'CANCELLED')}
-                                                disabled={updatingAptId === pat.appointmentId}
-                                                className="px-3 py-1.5 rounded-lg border border-rose-200 dark:border-rose-900/50 text-rose-500 text-[10px] font-bold hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors cursor-pointer"
-                                              >
-                                                Cancel
-                                              </button>
-                                            </div>
-                                          )}
+                                            )}
+
+                                            {pat.status !== 'COMPLETED' && pat.status !== 'CANCELLED' && pat.status !== 'NO_SHOW' && (
+                                              <>
+                                                <button
+                                                  onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'NO_SHOW')}
+                                                  disabled={updatingAptId === pat.appointmentId}
+                                                  className="px-2 py-1 rounded-lg border border-amber-300 dark:border-amber-900/50 text-amber-600 text-3xs font-bold hover:bg-amber-50 dark:hover:bg-amber-950/20 cursor-pointer"
+                                                >
+                                                  No-Show
+                                                </button>
+                                                <button
+                                                  onClick={() => handleUpdateAppointmentStatus(pat.appointmentId, 'CANCELLED')}
+                                                  disabled={updatingAptId === pat.appointmentId}
+                                                  className="px-2 py-1 rounded-lg border border-rose-200 dark:border-rose-900/50 text-rose-500 text-3xs font-bold hover:bg-rose-50 dark:hover:bg-rose-950/20 cursor-pointer"
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </>
+                                            )}
+                                          </div>
                                         </div>
                                       ))}
                                     </div>
@@ -555,7 +840,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                         </span>
                       </div>
                       <span className="text-xs font-black text-slate-800 dark:text-slate-200 font-mono">
-                        ${doc.consultationFee || 0}
+                        {formatINR(Number(doc.consultationFee) || 0)}
                       </span>
                     </div>
 
@@ -564,16 +849,35 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                         {doc.qualifications} · {doc.experienceYears || 0} yrs exp
                       </p>
                     )}
+
+                    {doc.unavailableDates && doc.unavailableDates.length > 0 && (
+                      <div className="pt-1">
+                        <span className="text-4xs font-mono uppercase text-amber-500 font-bold block mb-1">
+                          Upcoming Leaves:
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {doc.unavailableDates.map((dateStr: string) => (
+                            <span
+                              key={dateStr}
+                              className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 text-3xs font-mono font-bold"
+                            >
+                              {dateStr}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="pt-3 border-t border-slate-100 dark:border-slate-850 flex items-center justify-between">
-                    <span
-                      className={`text-3xs font-bold uppercase ${
-                        doc.isActive ? 'text-emerald-500' : 'text-slate-400'
-                      }`}
+                  <div className="pt-3 border-t border-slate-100 dark:border-slate-850 flex items-center justify-between gap-2">
+                    <button
+                      onClick={() => setLeaveModalDoctor(doc)}
+                      className="px-2.5 py-1 rounded-lg border border-amber-300 dark:border-amber-900/50 text-amber-600 text-3xs font-bold hover:bg-amber-50 dark:hover:bg-amber-950/20 transition-colors flex items-center gap-1 cursor-pointer"
                     >
-                      {doc.isActive ? 'Active on Roster' : 'Inactive'}
-                    </span>
+                      <CalendarX className="w-3 h-3" />
+                      <span>Leaves</span>
+                    </button>
+
                     <button
                       onClick={() => handleToggleDoctorActive(doc)}
                       className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-800 text-3xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors cursor-pointer"
@@ -589,7 +893,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
       )}
 
       {/* -------------------------------------------------------------
-          MODAL: Add Doctor (Feature 2)
+          MODAL: Add Doctor
           ------------------------------------------------------------- */}
       {showAddDoctorModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
@@ -656,10 +960,10 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                    Years of Experience
+                    Experience (Yrs)
                   </label>
                   <input
                     type="number"
@@ -672,7 +976,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                 </div>
                 <div>
                   <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                    Consultation Fee ($)
+                    Fee (₹)
                   </label>
                   <input
                     type="number"
@@ -681,6 +985,22 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                     onChange={(e) => setDocFee(e.target.value)}
                     className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
                   />
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Slot Duration
+                  </label>
+                  <select
+                    value={docDefaultSlotDuration}
+                    onChange={(e) => setDocDefaultSlotDuration(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="15">15 min</option>
+                    <option value="20">20 min</option>
+                    <option value="30">30 min</option>
+                    <option value="45">45 min</option>
+                    <option value="60">60 min</option>
+                  </select>
                 </div>
               </div>
 
@@ -706,7 +1026,7 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
       )}
 
       {/* -------------------------------------------------------------
-          MODAL: Create Time Slot (Feature 3)
+          MODAL: Create Single Time Slot
           ------------------------------------------------------------- */}
       {showAddSlotModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
@@ -794,22 +1114,37 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
-                  Slot Hourly Capacity (maxPatients) *
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="50"
-                  required
-                  value={slotMaxPatients}
-                  onChange={(e) => setSlotMaxPatients(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
-                />
-                <span className="text-3xs text-slate-400 mt-1 block">
-                  Atomic concurrency locking prevents overbooking past this exact limit.
-                </span>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Max Patients Cap *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50"
+                    required
+                    value={slotMaxPatients}
+                    onChange={(e) => setSlotMaxPatients(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Duration (Minutes)
+                  </label>
+                  <select
+                    value={slotDurationMinutes}
+                    onChange={(e) => setSlotDurationMinutes(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="15">15 min</option>
+                    <option value="20">20 min</option>
+                    <option value="30">30 min</option>
+                    <option value="45">45 min</option>
+                    <option value="60">60 min</option>
+                  </select>
+                </div>
               </div>
 
               <div className="flex gap-3 pt-2">
@@ -829,6 +1164,394 @@ export const DoctorAppointmentsSection: React.FC<DoctorAppointmentsSectionProps>
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* -------------------------------------------------------------
+          MODAL: Batch Generate Schedule
+          ------------------------------------------------------------- */}
+      {showBatchModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 md:p-8 max-w-lg w-full shadow-2xl space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                  Batch Generate Doctor Schedule
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Generate uniform discrete consultation slots across multiple days
+                </p>
+              </div>
+              <button
+                onClick={() => setShowBatchModal(false)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-900"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {batchMessage && (
+              <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-xs font-semibold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{batchMessage}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleBatchGenerate} className="space-y-4">
+              <div>
+                <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Doctor Specialist *
+                </label>
+                <select
+                  value={batchDoctorId}
+                  onChange={(e) => setBatchDoctorId(e.target.value)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                >
+                  {doctors.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name} ({d.specialization})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Start Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={batchStartDate}
+                    min={new Date().toISOString().split('T')[0]}
+                    onChange={(e) => setBatchStartDate(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    End Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={batchEndDate}
+                    min={batchStartDate}
+                    onChange={(e) => setBatchEndDate(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Daily Shift Start *
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={batchStartTime}
+                    onChange={(e) => setBatchStartTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Daily Shift End *
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={batchEndTime}
+                    onChange={(e) => setBatchEndTime(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Slot Duration (Minutes)
+                  </label>
+                  <select
+                    value={batchSlotDuration}
+                    onChange={(e) => setBatchSlotDuration(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="15">15 min</option>
+                    <option value="20">20 min</option>
+                    <option value="30">30 min</option>
+                    <option value="45">45 min</option>
+                    <option value="60">60 min</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Max Patients per Slot
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="50"
+                    required
+                    value={batchMaxPatients}
+                    onChange={(e) => setBatchMaxPatients(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBatchModal(false)}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={generatingSchedule}
+                  className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                >
+                  {generatingSchedule ? 'Generating Slots...' : 'Generate Slots'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* -------------------------------------------------------------
+          MODAL: Doctor Unavailable Dates / Leaves
+          ------------------------------------------------------------- */}
+      {leaveModalDoctor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                  Manage Doctor Leaves
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  {leaveModalDoctor.name} ({leaveModalDoctor.specialization})
+                </p>
+              </div>
+              <button
+                onClick={() => setLeaveModalDoctor(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-900"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  Add Leave / Unavailable Date (YYYY-MM-DD)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="date"
+                    value={newLeaveDate}
+                    min={new Date().toISOString().split('T')[0]}
+                    onChange={(e) => setNewLeaveDate(e.target.value)}
+                    className="flex-1 px-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  />
+                  <button
+                    onClick={handleAddUnavailableDate}
+                    disabled={savingLeave}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold cursor-pointer"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <span className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                  Scheduled Leave Dates ({leaveModalDoctor.unavailableDates?.length || 0})
+                </span>
+                {(!leaveModalDoctor.unavailableDates || leaveModalDoctor.unavailableDates.length === 0) ? (
+                  <p className="text-xs text-slate-400 italic">No unavailable dates currently scheduled.</p>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {leaveModalDoctor.unavailableDates.map((dateStr: string) => (
+                      <div
+                        key={dateStr}
+                        className="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-mono"
+                      >
+                        <span className="font-bold text-slate-800 dark:text-slate-200">{dateStr}</span>
+                        <button
+                          onClick={() => handleRemoveUnavailableDate(dateStr)}
+                          disabled={savingLeave}
+                          className="text-rose-500 hover:text-rose-600 p-1 rounded cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setLeaveModalDoctor(null)}
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* -------------------------------------------------------------
+          MODAL: Block/Unblock Slot
+          ------------------------------------------------------------- */}
+      {blockingSlot && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                  {blockingSlot.isBlocked ? 'Unblock Consultation Slot' : 'Block Consultation Slot'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  {blockingSlot.doctorName} · {blockingSlot.date} ({blockingSlot.startTime} - {blockingSlot.endTime})
+                </p>
+              </div>
+              <button
+                onClick={() => setBlockingSlot(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-900"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {!blockingSlot.isBlocked ? (
+                <div>
+                  <label className="block text-2xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                    Reason for Blocking Slot
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Doctor emergency surgery / Hospital meeting"
+                    value={blockReasonInput}
+                    onChange={(e) => setBlockReasonInput(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-emerald-500"
+                  />
+                  <span className="text-3xs text-slate-400 mt-1 block">
+                    Patients will be prevented from booking this slot until it is unblocked.
+                  </span>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-600 dark:text-slate-300">
+                  Unblocking this slot will restore it for patient booking up to its max capacity.
+                </p>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setBlockingSlot(null)}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleToggleBlockSlot}
+                  disabled={savingBlock}
+                  className={`flex-1 py-3 text-white rounded-xl text-xs font-black shadow-md transition-all cursor-pointer ${
+                    blockingSlot.isBlocked
+                      ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/20'
+                      : 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20'
+                  }`}
+                >
+                  {savingBlock
+                    ? 'Updating...'
+                    : blockingSlot.isBlocked
+                    ? 'Unblock Slot'
+                    : 'Block Slot'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* -------------------------------------------------------------
+          MODAL: Audit Trail Viewer
+          ------------------------------------------------------------- */}
+      {auditModalAppointmentId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 md:p-8 max-w-lg w-full shadow-2xl space-y-6">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 dark:text-white flex items-center gap-2">
+                  <History className="w-5 h-5 text-emerald-500" />
+                  Appointment Audit Trail
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
+                  ID: {auditModalAppointmentId}
+                </p>
+              </div>
+              <button
+                onClick={() => setAuditModalAppointmentId(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-900"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {loadingAudit ? (
+              <div className="py-8 text-center text-xs text-slate-400">Loading audit history...</div>
+            ) : auditLogs.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400 bg-slate-50 dark:bg-slate-900 rounded-2xl">
+                No audit events recorded for this appointment yet.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                {auditLogs.map((log: any) => (
+                  <div
+                    key={log.id}
+                    className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="px-2 py-0.5 rounded text-3xs font-black uppercase bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                        {log.action}
+                      </span>
+                      <span className="text-3xs text-slate-400 font-mono">
+                        {new Date(log.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-slate-800 dark:text-slate-200 font-medium">
+                      {log.reason || `Transitioned to ${log.newStatus}`}
+                    </div>
+
+                    <div className="text-3xs text-slate-400 flex items-center gap-2">
+                      <span>Actor: <strong className="text-slate-600 dark:text-slate-300">{log.actorName || log.actorRole}</strong> ({log.actorRole})</span>
+                      {log.previousStatus && (
+                        <span>• Status: {log.previousStatus} → {log.newStatus}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={() => setAuditModalAppointmentId(null)}
+              className="w-full py-3 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+            >
+              Close
+            </button>
           </div>
         </div>
       )}

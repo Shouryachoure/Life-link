@@ -1,17 +1,44 @@
 import { Router, Request, Response } from 'express';
-import { GoogleGenerativeAI, Content } from '@google/generative-ai';
+import * as jwt from 'jsonwebtoken';
+import { redactSensitiveString } from '../utils/privacyRedactor';
+import { aiProviderManager, NaniMessageItem, ToolCallProposal } from '../services/aiProvider';
+import { evaluateEmergencySafety, EmergencySafetyState } from '../services/naniEmergencyGuard';
+import { NANI_TOOLS, executeNaniTool } from '../services/naniTools';
+import { NANI_PROMPT_VERSION } from '../services/naniPrompts';
+import { modelRegistry } from '../services/naniModelRegistry';
+import { taskRouter } from '../services/naniTaskRouter';
+import { knowledgeRetrieval } from '../services/naniKnowledgeRetrieval';
+import { voiceCoordinator } from '../services/naniVoiceEngine';
 
 const router = Router();
 
-// In-memory conversation session store with timestamp tracking
-interface ChatSessionRecord {
-  history: Content[];
+const JWT_SECRET =
+  process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'lifelink_jwt_secret_key_2026_super_secure');
+
+// Persistent message record for conversational history inspection & auditing
+export interface ChatMessageRecord {
+  id: string;
+  sender: 'user' | 'nani';
+  text: string;
+  timestamp: string;
+  language?: string;
+  provider?: string;
+  isEmergency?: boolean;
+  toolCall?: any;
+}
+
+// In-memory conversation session store with user attribution and timestamp tracking
+export interface ChatSessionRecord {
+  sessionId: string;
+  userId?: string;
+  history: NaniMessageItem[];
+  messages: ChatMessageRecord[];
   lastActive: number;
 }
 
 const sessionStore = new Map<string, ChatSessionRecord>();
 
-// Periodic session cleanup (older than 2 hours)
+// Periodic session cleanup for expired sessions (older than 2 hours TTL)
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
@@ -20,134 +47,488 @@ setInterval(() => {
       sessionStore.delete(id);
     }
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref();
 
-const buildSystemInstruction = (language: string = 'English') => `
-You are "Nani", a warm, empathetic, and knowledgeable AI assistant for Life Link, an emergency medical response and hospital dispatch application.
-
-Your Personality:
-- Friendly, caring, courteous, and polite (like a comforting, knowledgeable healthcare coordinator).
-- Clear, concise, and focused.
-
-Strict Behavioral and Safety Rules:
-1. Exact & Direct Answers: Answer ONLY what the user explicitly asks. Do NOT offer unsolicited tips, unrequested feature tours, or lengthy tangents.
-2. Language Requirement: You MUST reply entirely in the requested language: "${language}". Match natural, fluent conversational phrasing for that language.
-3. LifeLink App Knowledge:
-   - LifeLink connects patients with rapid emergency ambulance dispatch (BLS - Basic Life Support, ALS - Advanced Life Support, Oxygen Support).
-   - The platform includes: SOS emergency button with a 10-second cancellable safety window, real-time ambulance GPS tracking, hospital bed capacity and department admissions (General Ward, ICU, Emergency), ER bay allocation telemetry, and patient medical profile management.
-4. Critical Medical Guardrails:
-   - You are NOT a doctor and must NEVER provide medical diagnosis, prescribe medications, or replace professional clinicians.
-   - For ANY query describing acute, severe, or life-threatening symptoms (such as chest pressure/pain, shortness of breath, severe bleeding, signs of stroke, unconsciousness, severe allergic reactions, or acute trauma):
-     IMMEDIATELY and URGENTLY direct the patient to press the LifeLink SOS button or call emergency services (e.g. 911 / 112 / 108). Do not delay with diagnostic chit-chat.
-   - For general non-urgent wellness or health inquiries, provide brief, accurate, non-diagnostic information accompanied by a light recommendation to consult a doctor.
-`;
+// In-memory sliding rate-limiter: max 30 requests per minute per sessionId / IP
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+function checkRateLimit(key: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(key);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(key, { count: 1, resetAt: now + 60000 });
+    return true;
+  }
+  if (entry.count >= 30) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
+}
 
 /**
- * POST /api/chatbot/message
+ * Extracts optional authenticated user identity from the Authorization Bearer header.
+ */
+function extractAuthUser(req: Request): { id: string; role: string; name?: string; email?: string } | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+
+  const token = authHeader.split(' ')[1];
+  if (!token) return null;
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    if (decoded && decoded.id) {
+      return { id: decoded.id, role: decoded.role || 'PATIENT', name: decoded.name, email: decoded.email };
+    }
+    return null;
+  } catch (err: any) {
+    throw new Error('INVALID_TOKEN');
+  }
+}
+
+/**
+ * GET /api/v1/chatbot/status
+ * Returns real-time model readiness, Ollama daemon status, Groq cloud status, and active tools.
+ */
+router.get('/status', async (_req: Request, res: Response) => {
+  try {
+    const health = await aiProviderManager.healthCheck();
+    const activeProvider = aiProviderManager.getActiveProviderType();
+    const providerMode = aiProviderManager.getProviderMode();
+    const groqAdapter = aiProviderManager.getGroqAdapter();
+    const ollamaAdapter = aiProviderManager.getOllamaAdapter();
+    const nvidiaAdapter = aiProviderManager.getNvidiaAdapter();
+    const voiceStatus = await voiceCoordinator.getStatus();
+    const knowledgeStatus = await knowledgeRetrieval.checkEmbeddingModelAvailability();
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        provider: health.provider,
+        activeProvider,
+        providerMode,
+        model: health.model,
+        available: health.available,
+        latencyMs: health.latencyMs,
+        installedModels: health.installedModels || [],
+        zeroCost: aiProviderManager.isZeroCost(),
+        promptVersion: NANI_PROMPT_VERSION,
+        toolsEnabled: NANI_TOOLS.map((t: any) => t.function.name),
+        rateLimited: health.rateLimited,
+        cooldownRemainingSec: health.cooldownRemainingSec,
+        groqConfigured: groqAdapter.isConfigured(),
+        ollamaConfigured: ollamaAdapter.isConfigured(),
+        nvidiaConfigured: nvidiaAdapter.isConfigured(),
+        modelRegistry: modelRegistry.getAll().map((m) => ({
+          id: m.id,
+          displayName: m.displayName,
+          provider: m.provider,
+          privacyClassification: m.privacyClassification,
+          costMode: m.costMode,
+          isAvailable: m.isAvailable,
+          taskCapabilities: m.taskCapabilities,
+        })),
+        voiceEngineStatus: voiceStatus,
+        knowledgeEngineStatus: knowledgeStatus,
+        error: health.error,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      status: 'error',
+      message: err.message || 'Failed to check model status',
+    });
+  }
+});
+
+/**
+ * GET /api/v1/chatbot/config
+ * Returns current AI provider configuration, model info, emergency numbers,
+ * speech synthesis/recognition limitations, zero-cost mode, and privacy retention policy.
+ */
+router.get('/config', (_req: Request, res: Response) => {
+  const activeProvider = aiProviderManager.getActiveProviderType();
+  const providerMode = aiProviderManager.getProviderMode();
+  const isLive = aiProviderManager.isLiveAiConfigured();
+  const isZeroCost = aiProviderManager.isZeroCost();
+  const activeModel = aiProviderManager.getActiveModelName();
+  const groq = aiProviderManager.getGroqAdapter();
+
+  return res.status(200).json({
+    status: 'success',
+    data: {
+      provider: activeProvider,
+      providerMode,
+      isLiveAiConfigured: isLive,
+      model: activeModel,
+      groqConfigured: groq.isConfigured(),
+      groqModel: groq.modelIdentifier,
+      promptVersion: NANI_PROMPT_VERSION,
+      voiceSupported: true,
+      emergencyNumber: '112',
+      nationalAmbulanceNumber: '108',
+      zeroCostMode: isZeroCost,
+      pricingNotes: isZeroCost
+        ? 'Zero-cost local-first operation active via Ollama. No external cloud API fees or per-token charges.'
+        : 'External cloud model active (Groq / Gemini). Usage limits and cloud policies apply.',
+      integrationDisclaimer:
+        'LifeLink provides rapid one-tap dialing assistance for National Emergency 112 and Ambulance 108. LifeLink does not claim an official government backend dispatch integration with 112.',
+      privacyPolicy: {
+        audioRetention:
+          'LifeLink does NOT record, stream, or store user microphone audio on any server. Voice recognition operates client-side via browser Web Speech API.',
+        retentionPolicy: 'In-memory sliding TTL (2 hours) or deleted immediately on user clear request.',
+        piiHandling:
+          'Client and server sanitize phone numbers, emails, Aadhaar IDs, and credentials before any external or local model dispatch.',
+        authenticatedTenantIsolation:
+          'Conversation history is strictly partitioned by authenticated user ID or private session key.',
+        externalAiPolicy:
+          'Groq cloud inference is only utilized when explicit user consent (allowExternalAi) is granted. Otherwise, queries remain strictly on private local models.',
+      },
+      speechCapabilities: {
+        supported: true,
+        speechSynthesis: 'Browser-native Web Speech API SpeechSynthesis running 100% on-device with zero network latency.',
+        speechRecognition:
+          'Browser-native Web Speech API SpeechRecognition supported in Google Chrome, Microsoft Edge, and Safari; unsupported by default in Mozilla Firefox.',
+        limitations:
+          'Microphone permissions require secure context (HTTPS) in production. SpeechRecognition is limited or unsupported in Firefox without experimental flags.',
+        offlineVoiceSupport: 'Local browser synthetic voices execute 100% on-device with zero network latency or cost.',
+        httpsRequired: 'Microphone permissions require secure context (HTTPS) in production deployments.',
+      },
+    },
+  });
+});
+
+/**
+ * GET /api/v1/chatbot/history
+ * Retrieves stored conversation messages for the current session or authenticated user.
+ */
+router.get('/history', (req: Request, res: Response) => {
+  let authUser: { id: string; role: string } | null = null;
+  try {
+    authUser = extractAuthUser(req);
+  } catch {
+    return res.status(401).json({ status: 'fail', message: 'Invalid or expired authorization token.' });
+  }
+
+  const queryUserId = (req.query.userId as string) || undefined;
+  const sessionId = (req.query.sessionId as string) || undefined;
+
+  // Horizontal authorization gatekeeper
+  if (authUser) {
+    if (queryUserId && queryUserId !== authUser.id && authUser.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({
+        status: 'fail',
+        message: "Forbidden: You do not have permission to access another user's conversation history.",
+      });
+    }
+  } else if (queryUserId) {
+    return res.status(401).json({
+      status: 'fail',
+      message: 'Authentication required to inspect patient conversation history.',
+    });
+  }
+
+  // Locate session by sessionId or userId
+  let matchedSession: ChatSessionRecord | undefined;
+  if (sessionId && sessionStore.has(sessionId)) {
+    matchedSession = sessionStore.get(sessionId);
+    if (matchedSession?.userId && authUser && matchedSession.userId !== authUser.id && authUser.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({
+        status: 'fail',
+        message: "Forbidden: You do not have permission to access another user's conversation session.",
+      });
+    }
+  } else if (authUser) {
+    for (const session of sessionStore.values()) {
+      if (session.userId === authUser.id) {
+        matchedSession = session;
+        break;
+      }
+    }
+  }
+
+  return res.status(200).json({
+    status: 'success',
+    data: {
+      sessionId: matchedSession?.sessionId || sessionId || 'none',
+      messages: matchedSession?.messages || [],
+      count: matchedSession?.messages?.length || 0,
+      retentionPolicy: 'In-memory 2-hour TTL sliding window',
+    },
+  });
+});
+
+/**
+ * DELETE /api/v1/chatbot/history
+ * Clears stored conversation messages for the current session or authenticated user.
+ */
+router.delete('/history', (req: Request, res: Response) => {
+  let authUser: { id: string; role: string } | null = null;
+  try {
+    authUser = extractAuthUser(req);
+  } catch {
+    return res.status(401).json({ status: 'fail', message: 'Invalid or expired authorization token.' });
+  }
+
+  const targetUserId = (req.query.userId as string) || (req.body?.userId as string) || undefined;
+  const sessionId = (req.query.sessionId as string) || (req.body?.sessionId as string) || undefined;
+
+  if (authUser) {
+    if (targetUserId && targetUserId !== authUser.id && authUser.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({
+        status: 'fail',
+        message: "Forbidden: You do not have permission to clear another user's conversation history.",
+      });
+    }
+
+    const toDelete: string[] = [];
+    for (const [sId, record] of sessionStore.entries()) {
+      if (record.userId === authUser.id || (sessionId && sId === sessionId)) {
+        toDelete.push(sId);
+      }
+    }
+    toDelete.forEach((id) => sessionStore.delete(id));
+  } else {
+    if (targetUserId) {
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Authentication required to clear user conversation history.',
+      });
+    }
+    if (sessionId) {
+      sessionStore.delete(sessionId);
+    }
+  }
+
+  return res.status(200).json({
+    status: 'success',
+    message: 'Conversation history cleared successfully in compliance with privacy retention guidelines.',
+  });
+});
+
+/**
+ * POST /api/v1/chatbot/message
+ * Primary conversational entry point.
  * Body: { message: string, language?: string, sessionId?: string }
  */
 router.post('/message', async (req: Request, res: Response) => {
   try {
-    const { message, language = 'English', sessionId = `session_${Date.now()}` } = req.body;
+    let authUser: { id: string; role: string; name?: string } | null = null;
+    try {
+      authUser = extractAuthUser(req);
+    } catch {
+      return res.status(401).json({ status: 'fail', message: 'Invalid or expired authorization token.' });
+    }
+
+    const { message, language = 'Hinglish', sessionId = `session_${Date.now()}`, allowExternalAi } = req.body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: 'Message content is required.' });
     }
 
+    // Input length limit check
+    if (message.length > 1500) {
+      return res.status(400).json({
+        error: 'Message length exceeds maximum allowable limit of 1500 characters. Please provide a more concise inquiry.',
+        code: 'MESSAGE_TOO_LONG',
+      });
+    }
+
+    // Rate limit check
+    const rateLimitKey = authUser?.id || req.ip || sessionId;
+    if (!checkRateLimit(rateLimitKey)) {
+      return res.status(429).json({
+        error: 'Too many requests. Please wait a moment before sending another message to Nani.',
+        code: 'RATE_LIMIT_EXCEEDED',
+      });
+    }
+
     const trimmedMessage = message.trim();
-    const apiKey = process.env.GEMINI_API_KEY;
 
     // Retrieve or initialize conversation session history
     let session = sessionStore.get(sessionId);
     if (!session) {
-      session = { history: [], lastActive: Date.now() };
+      session = {
+        sessionId,
+        userId: authUser?.id,
+        history: [],
+        messages: [],
+        lastActive: Date.now(),
+      };
       sessionStore.set(sessionId, session);
     } else {
       session.lastActive = Date.now();
+      if (authUser && !session.userId) {
+        session.userId = authUser.id;
+      }
     }
 
-    // Fallback if GEMINI_API_KEY is not configured in backend/.env
-    if (!apiKey) {
-      console.warn('GEMINI_API_KEY is not defined in backend/.env. Using contextual domain fallback reply.');
-      const lower = trimmedMessage.toLowerCase();
-      let mockReply = '';
+    // Record incoming user message in session message log
+    const userMsgRecord: ChatMessageRecord = {
+      id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      sender: 'user',
+      text: trimmedMessage,
+      timestamp: new Date().toISOString(),
+      language,
+    };
+    session.messages.push(userMsgRecord);
 
-      if (lower.includes('sos') || lower.includes('emergency') || lower.includes('chest') || lower.includes('breath') || lower.includes('bleeding') || lower.includes('heart attack')) {
-        mockReply = language.toLowerCase().includes('hindi')
-          ? 'यह आपातकालीन स्थिति लग रही है। कृपया तुरंत ऐप में लाल SOS बटन दबाएं या आपातकालीन सेवा (112 / 108) को कॉल करें!'
-          : 'This sounds urgent. Please click the SOS button right now or call your local emergency number (112 / 911 / 108) immediately!';
-      } else if (lower.includes('how') && lower.includes('sos')) {
-        mockReply = 'The SOS button initiates an emergency alert with a 10-second safety cancellation window. If not cancelled within 10 seconds, it automatically dispatches the nearest ambulance to your GPS location.';
-      } else if (lower.includes('ambulance') || lower.includes('vehicle')) {
-        mockReply = 'LifeLink supports three types of ambulances: Basic Life Support (BLS), Advanced Life Support (ALS) with paramedic monitoring, and Oxygen Support for respiratory distress.';
-      } else if (lower.includes('bed') || lower.includes('hospital') || lower.includes('admission')) {
-        mockReply = 'You can check real-time hospital bed availability and submit admission requests under the "Beds & Admissions" tab in your Patient Dashboard.';
-      } else if (lower.includes('profile') || lower.includes('blood') || lower.includes('allerg')) {
-        mockReply = 'You can update your blood group, known allergies, emergency contacts, and medical history in the "Medical Profile" tab of your dashboard.';
-      } else if (lower.includes('who are you') || lower.includes('nani') || lower.includes('hello') || lower.includes('hi')) {
-        mockReply = language.toLowerCase().includes('hindi')
-          ? 'नमस्ते! मैं नानी हूँ, आपकी लाइफलिंक स्वास्थ्य सहायक। मैं एम्बुलेंस, अस्पताल के बेड और ऐप सुविधाओं में आपकी मदद कर सकती हूँ।'
-          : 'Hello! I am Nani, your caring LifeLink healthcare assistant. I can help you navigate emergency dispatch, find hospital beds, and explain platform features.';
-      } else {
-        mockReply = language.toLowerCase().includes('hindi')
-          ? 'मैं नानी हूँ। आप मुझसे लाइफलिंक आपातकालीन सेवाओं, अस्पताल के बेड और एम्बुलेंस के बारे में पूछ सकते हैं। (पूरी तरह से सक्रिय करने के लिए backend/.env में GEMINI_API_KEY दर्ज करें)'
-          : `I am Nani. I can guide you on LifeLink emergency dispatch, hospital bed availability, and patient profiles. (To enable unrestricted Gemini AI conversational answers, please set your GEMINI_API_KEY in backend/.env)`;
-      }
+    // =========================================================================
+    // STEP 1: DETERMINISTIC EMERGENCY SAFETY GUARDRAIL
+    // Clinical Rule: Runs BEFORE any model invocation. Zero conversational delay.
+    // =========================================================================
+    const emergencyState: EmergencySafetyState = evaluateEmergencySafety(trimmedMessage, language);
 
-      return res.json({
-        reply: mockReply,
+    if (emergencyState.requiresUrgentGuidance) {
+      const guardrailProvider = aiProviderManager.isLiveAiConfigured() ? 'emergency_guardrail' : 'local_fallback';
+
+      const botReplyRecord: ChatMessageRecord = {
+        id: `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        sender: 'nani',
+        text: emergencyState.guidance,
+        timestamp: new Date().toISOString(),
+        language,
+        provider: guardrailProvider,
+        isEmergency: true,
+      };
+      session.messages.push(botReplyRecord);
+
+      return res.status(200).json({
+        reply: emergencyState.guidance,
         sessionId,
         language,
+        isEmergency: true,
+        safetyLevel: emergencyState.safetyLevel,
+        requiresUrgentGuidance: true,
+        detectedKeywords: emergencyState.detectedKeywords,
+        provider: guardrailProvider,
+        emergencyContact: '112',
+        emergencyGuidance: {
+          nationalEmergency: emergencyState.emergencyNumber,
+          ambulanceMedicalService: emergencyState.ambulanceNumber,
+          action: 'DIAL_112_OR_TRIGGER_SOS',
+          ambulanceType: 'ADVANCED_LIFE_SUPPORT',
+          dispatchAvailable: emergencyState.dispatchAvailable,
+          autoDispatch: false,
+          disclaimer:
+            'Nani is an AI assistant, not a doctor or diagnostic service. Immediate professional medical care is required.',
+          integrationNote:
+            'LifeLink provides direct 112 calling assistance and does not claim official government backend dispatch integration with National Emergency 112.',
+        },
       });
     }
 
-    // Initialize Google Gemini Client
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-
-    const model = genAI.getGenerativeModel({
-      model: modelName,
-      systemInstruction: buildSystemInstruction(language),
-    });
-
-    // Start chat with rolling history
-    const chat = model.startChat({
+    // =========================================================================
+    // STEP 2: TASK-AWARE & PRIVACY-AWARE MULTI-MODEL ROUTING
+    // =========================================================================
+    const aiResult = await taskRouter.routeAndExecute({
+      prompt: trimmedMessage,
+      language,
+      sessionId,
       history: session.history,
+      tools: NANI_TOOLS,
+      authUser,
+      allowExternalAi: Boolean(allowExternalAi),
     });
 
-    const result = await chat.sendMessage(trimmedMessage);
-    const replyText = result.response.text();
+    let finalReply = aiResult.reply;
+    let toolExecutionData: any = null;
 
-    // Update session history (keep last 10 messages = 5 exchanges)
-    session.history.push({
-      role: 'user',
-      parts: [{ text: trimmedMessage }],
-    });
-    session.history.push({
-      role: 'model',
-      parts: [{ text: replyText }],
-    });
+    // =========================================================================
+    // STEP 3: STRICT TOOL CALL HANDLING
+    // =========================================================================
+    if (aiResult.toolCalls && aiResult.toolCalls.length > 0) {
+      const toolCall = aiResult.toolCalls[0];
+      const toolExec = await executeNaniTool(toolCall.function.name, toolCall.function.arguments, authUser);
+      toolExecutionData = toolExec;
 
-    if (session.history.length > 10) {
-      session.history = session.history.slice(-10);
+      if (toolExec.requiresUserConfirmation) {
+        finalReply = `${finalReply ? finalReply + '\n\n' : ''}⚠️ I have prepared the ${toolCall.function.name === 'book_doctor_appointment' ? 'appointment booking' : 'ambulance dispatch'} request. Please confirm to proceed.`;
+      } else if (toolExec.success && toolExec.data) {
+        // Incorporate tool output into conversation
+        if (toolCall.function.name === 'search_hospitals') {
+          const count = toolExec.data.count || 0;
+          const facList = (toolExec.data.facilities || []).slice(0, 3).map((f: any) => `• **${f.name}** (${f.locality}, ${f.tehsil}) - 📞 ${f.emergencyPhone || '112'}`).join('\n');
+          finalReply = `${finalReply ? finalReply + '\n\n' : ''}Found ${count} hospital(s):\n${facList}`;
+        } else if (toolCall.function.name === 'get_hospital_contact') {
+          const d = toolExec.data;
+          finalReply = `🏥 **${d.name}**\n📍 ${d.address || d.locality}\n🚨 24x7 Emergency Desk: **${d.emergencyPhone}**\n🚑 Ambulance Helpdesk: **${d.ambulancePhone}**`;
+        } else if (toolCall.function.name === 'check_bed_capacity') {
+          const d = toolExec.data;
+          finalReply = `🛏️ **${d.hospitalName} Bed Capacity:**\n• Available Beds: **${d.availableBeds} / ${d.totalBeds}**\n• ICU Available: **${d.icuAvailable}**\n• Status: **${d.dataFreshness}** (${d.ageMinutes} mins ago)`;
+        } else if (toolCall.function.name === 'check_doctor_slots') {
+          const doc = toolExec.data.doctors?.[0];
+          if (doc) {
+            const slotsText = doc.slots.map((s: any) => `• ${s.date} ${s.time} (${s.remainingCapacity} slots left)`).join('\n');
+            finalReply = `👨‍⚕️ **${doc.name}** (${doc.specialization})\n🏥 ${doc.hospital}\nAvailable Slots:\n${slotsText || 'No open slots on this date.'}`;
+          }
+        }
+      }
     }
 
-    return res.json({
-      reply: replyText,
+    // Update rolling history for context window (last 10 exchanges = 20 items)
+    const sanitizedPrompt = redactSensitiveString(trimmedMessage);
+    session.history.push({
+      role: 'user',
+      content: sanitizedPrompt,
+    });
+    session.history.push({
+      role: 'assistant',
+      content: finalReply,
+    });
+
+    if (session.history.length > 20) {
+      session.history = session.history.slice(-20);
+    }
+
+    // Record bot reply in session message log
+    const botReplyRecord: ChatMessageRecord = {
+      id: `bot_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      sender: 'nani',
+      text: finalReply,
+      timestamp: new Date().toISOString(),
+      language,
+      provider: aiResult.provider,
+      isEmergency: false,
+      toolCall: toolExecutionData,
+    };
+    session.messages.push(botReplyRecord);
+
+    return res.status(200).json({
+      reply: finalReply,
       sessionId,
       language,
+      isEmergency: false,
+      safetyLevel: 'NON_EMERGENCY',
+      provider: aiResult.provider,
+      modelName: aiResult.modelName,
+      costMode: aiResult.costMode,
+      pricingNote: aiResult.pricingNote,
+      disclaimer: aiResult.disclaimer,
+      toolExecution: toolExecutionData,
+      taskCategory: aiResult.taskCategory,
+      selectedModelId: aiResult.selectedModelId,
+      retrievedDocuments: aiResult.retrievedDocuments,
+      reviewedBySecondModel: aiResult.reviewedBySecondModel,
+      routingLatencyMs: aiResult.routingLatencyMs,
+      latencyMs: aiResult.latencyMs,
+      error: aiResult.error,
     });
   } catch (error: any) {
-    console.error('Error in Gemini Chatbot API:', error);
+    console.error('Error in Nani Chatbot API:', error);
 
-    // Provide friendly fallback if rate limit or model issue occurs
     const userFallback =
-      'I apologize, but I am having a brief moment of connection difficulty. If you have an urgent medical need, please tap the SOS button immediately!';
+      'I apologize, but I am experiencing connection difficulty with the health response network. Operating in zero-cost safe fallback. If you have an urgent medical need, please tap the SOS button or call 112 immediately!';
 
     return res.status(200).json({
       reply: userFallback,
       sessionId: req.body?.sessionId || 'default',
-      error: error.message || 'Gemini processing error',
+      isEmergency: false,
+      safetyLevel: 'NON_EMERGENCY',
+      provider: 'local_fallback',
+      error: error.message || 'Processing error',
     });
   }
 });

@@ -27,8 +27,14 @@ import {
   Info,
   Wifi,
   Bed,
-  Stethoscope
+  Stethoscope,
+  ExternalLink,
+  ShieldAlert,
+  X
 } from 'lucide-react';
+import { formatIndianPhone } from '../utils/localization';
+import { getBackendBaseUrl } from '../config/apiConfig';
+import { NetworkStatusIndicator } from '../components/ui/NetworkStatusIndicator';
 
 // Specialized synthesizer alarm generator
 function playAlertSound() {
@@ -70,12 +76,40 @@ export const DriverDashboard: React.FC = () => {
   // Availability state (Online/Offline)
   const [isOnline, setIsOnline] = useState(user?.ambulance?.isAvailable || false);
 
-  // Live coords
-  const [lat, setLat] = useState(user?.ambulance?.currentLat || 37.7749);
-  const [lng, setLng] = useState(user?.ambulance?.currentLng || -122.4194);
+  // Live coords (default to Nagpur Pilot Zone)
+  const [lat, setLat] = useState(user?.ambulance?.currentLat || 21.1458);
+  const [lng, setLng] = useState(user?.ambulance?.currentLng || 79.0882);
 
   // Incoming Request Alert Modal
   const [incomingRequest, setIncomingRequest] = useState<any>(null);
+  const [incomingCountdown, setIncomingCountdown] = useState<number>(45);
+  const [isOfferExpired, setIsOfferExpired] = useState<boolean>(false);
+  const [requestReceivedTime, setRequestReceivedTime] = useState<Date | null>(null);
+  const [acceptingOffer, setAcceptingOffer] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!incomingRequest) {
+      setIsOfferExpired(false);
+      return;
+    }
+
+    setIncomingCountdown(45);
+    setIsOfferExpired(false);
+    setRequestReceivedTime(new Date());
+
+    const timer = setInterval(() => {
+      setIncomingCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setIsOfferExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [incomingRequest]);
 
   // Active Trip state
   const [activeTrip, setActiveTrip] = useState<any>(null);
@@ -205,18 +239,21 @@ export const DriverDashboard: React.FC = () => {
 
     // Accept Success
     socket.on('request:accept_success', (data: { request: any }) => {
+      setAcceptingOffer(false);
       setActiveTrip(data.request);
       setIncomingRequest(null);
     });
 
     // Accept Error
     socket.on('request:accept_error', (data: { message: string }) => {
+      setAcceptingOffer(false);
       alert(data.message);
       setIncomingRequest(null);
     });
 
     // Status Success
     socket.on('trip:status_success', (data: { request: any }) => {
+      setAcceptingOffer(false);
       const request = data.request;
       if (request.status === 'COMPLETED' || request.status === 'REJECTED') {
         setActiveTrip(null);
@@ -272,6 +309,99 @@ export const DriverDashboard: React.FC = () => {
     }
   };
 
+  // Real-Time GPS Tracking State (Module E: Driver Device Geolocation)
+  const [gpsStatus, setGpsStatus] = useState<'IDLE' | 'ACTIVE' | 'DENIED' | 'UNAVAILABLE' | 'SIMULATED'>('IDLE');
+  const [gpsLastUpdated, setGpsLastUpdated] = useState<Date | null>(null);
+  const [gpsErrorMsg, setGpsErrorMsg] = useState<string>('');
+
+  // Device GPS Tracking Loop
+  useEffect(() => {
+    // Only track when driver is online or actively on a trip
+    if (!isOnline && !activeTrip) {
+      setGpsStatus('IDLE');
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setGpsStatus('UNAVAILABLE');
+      setGpsErrorMsg('Geolocation is not supported by your current browser.');
+      return;
+    }
+
+    let isMounted = true;
+    let lastSentTime = 0;
+
+    const handlePosition = async (pos: GeolocationPosition) => {
+      if (!isMounted) return;
+      const curLat = pos.coords.latitude;
+      const curLng = pos.coords.longitude;
+      const speedMs = pos.coords.speed; // speed in meters/second
+      const speedKmH = speedMs !== null && !isNaN(speedMs) ? Math.round(speedMs * 3.6) : undefined;
+
+      setLat(curLat);
+      setLng(curLng);
+      setGpsStatus('ACTIVE');
+      setGpsLastUpdated(new Date());
+      setGpsErrorMsg('');
+
+      const now = Date.now();
+      // Throttle backend transmissions to at most once every 3 seconds to avoid flooding
+      if (now - lastSentTime >= 3000) {
+        lastSentTime = now;
+        try {
+          await apiFetch('/ambulances/location', {
+            method: 'PUT',
+            body: JSON.stringify({ lat: curLat, lng: curLng }),
+          });
+
+          if (socket) {
+            socket.emit('driver:location_update', {
+              driverId: user?.id,
+              lat: curLat,
+              lng: curLng,
+              requestId: activeTrip?.id,
+            });
+          }
+
+          if (activeTrip && activeTrip.id) {
+            await apiFetch(`/sos/trips/${activeTrip.id}/location`, {
+              method: 'POST',
+              body: JSON.stringify({
+                lat: curLat,
+                lng: curLng,
+                speedKmH,
+              }),
+            }).catch(() => {});
+          }
+        } catch (err: any) {
+          console.warn('GPS location push error:', err.message);
+        }
+      }
+    };
+
+    const handleError = (err: GeolocationPositionError) => {
+      if (!isMounted) return;
+      if (err.code === err.PERMISSION_DENIED) {
+        setGpsStatus('DENIED');
+        setGpsErrorMsg('GPS permission denied. Please allow location access in your browser settings.');
+      } else {
+        setGpsStatus('UNAVAILABLE');
+        setGpsErrorMsg(err.message || 'GPS telemetry currently unavailable.');
+      }
+    };
+
+    const watchId = navigator.geolocation.watchPosition(handlePosition, handleError, {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 3000,
+    });
+
+    return () => {
+      isMounted = false;
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [isOnline, activeTrip?.id, user?.id, socket]);
+
   // Route Simulation (Synchronized with backend road routing simulator)
   useEffect(() => {
     if (!socket) return;
@@ -279,6 +409,8 @@ export const DriverDashboard: React.FC = () => {
     const handleCoordinatesSimulated = (data: { lat: number; lng: number }) => {
       setLat(data.lat);
       setLng(data.lng);
+      setGpsStatus('SIMULATED');
+      setGpsLastUpdated(new Date());
     };
 
     socket.on('driver:coordinates_simulated', handleCoordinatesSimulated);
@@ -288,14 +420,28 @@ export const DriverDashboard: React.FC = () => {
     };
   }, [socket]);
 
-  // Action Accept triggered by Slide Accept
+  // Action Accept triggered by Slide Accept (Debounced & Idempotent)
   const handleAcceptRequest = () => {
-    if (!socket || !incomingRequest) return;
+    if (!socket || !incomingRequest || acceptingOffer) return;
+    setAcceptingOffer(true);
     socket.emit('request:accept', {
       requestId: incomingRequest.requestId,
       driverId: user?.id,
+      idempotencyKey: `accept_${incomingRequest.requestId}_${user?.id}`,
     });
   };
+
+  // Reconnection reconciliation: refetch authoritative active trip
+  useEffect(() => {
+    const handleReconnected = () => {
+      console.log('Driver Socket reconnected: Reconciling authoritative trip state...');
+      apiFetch('/requests/active').then((trip) => {
+        if (trip) setActiveTrip(trip);
+      }).catch(() => {});
+    };
+    window.addEventListener('lifelink:reconnected', handleReconnected);
+    return () => window.removeEventListener('lifelink:reconnected', handleReconnected);
+  }, [apiFetch]);
 
   // Reject dismiss triggered by Slide Reject
   const handleRejectRequest = () => {
@@ -374,6 +520,7 @@ export const DriverDashboard: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-4">
+          <NetworkStatusIndicator compact />
           <ThemeToggle />
 
           {/* Duty status toggle button */}
@@ -395,6 +542,33 @@ export const DriverDashboard: React.FC = () => {
         </div>
       </header>
 
+      {/* Network Connectivity & Synchronization Indicator Banner */}
+      <div className="max-w-7xl mx-auto w-full px-4 md:px-6 pt-4">
+        <NetworkStatusIndicator />
+      </div>
+
+      {/* Verification & Eligibility Alert Banner */}
+      {user?.driverProfile?.verificationState !== 'VERIFIED' && (
+        <div className="max-w-7xl mx-auto w-full px-4 md:px-6 pt-4">
+          <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 flex items-start gap-4 shadow-sm">
+            <AlertTriangle className="w-6 h-6 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-amber-900 dark:text-amber-200">
+                  Driver Dispatch Ineligible: Verification {user?.driverProfile?.verificationState || 'PENDING_REVIEW'}
+                </h2>
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-100">
+                  REAL DISPATCH LOCKED
+                </span>
+              </div>
+              <p className="text-xs text-amber-800 dark:text-amber-300 mt-1">
+                Under Nagpur Pilot operational requirements, drivers cannot participate in real emergency dispatch until: (1) identity documents are verified, (2) commercial driver license is validated, and (3) an active ambulance vehicle is assigned by your hospital or private operator.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Container */}
       {activeTab === 'DISPATCH' ? (
         <div className="max-w-7xl w-full mx-auto p-4 md:p-6 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fadeIn">
@@ -405,11 +579,53 @@ export const DriverDashboard: React.FC = () => {
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase">
                 <Navigation className="w-4 h-4 text-blue-500" />
                 <span>Turn-by-turn Navigation GPS</span>
+                <span
+                  className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+                    gpsStatus === 'ACTIVE'
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                      : gpsStatus === 'DENIED'
+                      ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                      : gpsStatus === 'SIMULATED'
+                      ? 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-300 dark:border-slate-700'
+                  }`}
+                >
+                  {gpsStatus === 'ACTIVE'
+                    ? '● GPS LIVE'
+                    : gpsStatus === 'DENIED'
+                    ? '⚠ GPS DENIED'
+                    : gpsStatus === 'SIMULATED'
+                    ? 'SIMULATED TRACE'
+                    : 'GPS STANDBY'}
+                </span>
               </div>
               <span className="text-2xs font-mono text-slate-550 dark:text-slate-500">
                 Loc: {lat.toFixed(5)}, {lng.toFixed(5)}
               </span>
             </div>
+
+            {/* GPS Permission Warning Banner */}
+            {gpsStatus === 'DENIED' && (
+              <div className="mb-3 p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-xs flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-amber-500" />
+                  <span>
+                    {gpsErrorMsg || 'Device location permission denied. Running with Nagpur pilot default coordinates.'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLat(21.1458);
+                    setLng(79.0882);
+                    setGpsStatus('SIMULATED');
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[10px] uppercase tracking-wider shrink-0"
+                >
+                  Use Pilot Preset
+                </button>
+              </div>
+            )}
 
             <div className="flex-1 rounded-2xl overflow-hidden min-h-[350px]">
               {activeTrip ? (
@@ -418,9 +634,20 @@ export const DriverDashboard: React.FC = () => {
                   driverLoc={[lat, lng]}
                   hospitalLoc={activeTrip.hospital ? [activeTrip.hospital.lat, activeTrip.hospital.lng] : null}
                   status={activeTrip.status}
+                  onMapClick={(coords) => {
+                    setLat(coords.lat);
+                    setLng(coords.lng);
+                  }}
                 />
               ) : (
-                <LeafletMap patientLoc={[lat, lng]} status="IDLE" />
+                <LeafletMap
+                  patientLoc={[lat, lng]}
+                  status="IDLE"
+                  onMapClick={(coords) => {
+                    setLat(coords.lat);
+                    setLng(coords.lng);
+                  }}
+                />
               )}
             </div>
           </div>
@@ -457,7 +684,9 @@ export const DriverDashboard: React.FC = () => {
                       </div>
                       <div>
                         <span className="text-3xs text-slate-500 uppercase tracking-widest block font-semibold">Contact</span>
-                        <p className="text-xs font-bold text-slate-200">{activeTrip.patient?.phone}</p>
+                        <p className="text-xs font-bold text-slate-200">
+                          {formatIndianPhone(activeTrip.patient?.phone)}
+                        </p>
                       </div>
                     </div>
                     <div>
@@ -471,6 +700,38 @@ export const DriverDashboard: React.FC = () => {
                       </p>
                     </div>
                   </div>
+
+                  {/* Safe-to-Interact Protocol Driving Alert */}
+                  {(activeTrip.status === 'ACCEPTED' || activeTrip.status === 'ARRIVING' || activeTrip.status === 'IN_TRANSIT') && (
+                    <div className="p-3.5 bg-amber-500/10 border-2 border-amber-500/30 rounded-2xl flex items-start gap-2.5 text-xs text-amber-800 dark:text-amber-300">
+                      <ShieldAlert className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block font-bold">Safe-to-Interact: Vehicle In Motion</strong>
+                        <span className="text-3xs text-amber-700 dark:text-amber-400">
+                          Do not type or navigate complex screens while driving. Follow audio guidance or hand device to paramedic crew.
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* External Navigation GPS Handoff Button */}
+                  <a
+                    href={`https://www.google.com/maps/dir/?api=1&destination=${
+                      activeTrip.status === 'IN_TRANSIT' || activeTrip.status === 'AT_HOSPITAL'
+                        ? `${activeTrip.hospital.lat},${activeTrip.hospital.lng}`
+                        : `${activeTrip.pickupLat},${activeTrip.pickupLng}`
+                    }`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min"
+                  >
+                    <Navigation className="w-4 h-4" />
+                    <span>
+                      {activeTrip.status === 'IN_TRANSIT' || activeTrip.status === 'AT_HOSPITAL'
+                        ? 'Open ER Hospital Route in Google Maps ↗'
+                        : 'Open Patient Pickup Route in Google Maps ↗'}
+                    </span>
+                  </a>
 
                   {/* ER Bay Readiness / Trauma Team Assignment */}
                   {activeTrip.assignedBay ? (
@@ -519,7 +780,7 @@ export const DriverDashboard: React.FC = () => {
                   {activeTrip.status === 'ACCEPTED' && (
                     <button
                       onClick={() => handleUpdateStatus('ARRIVING')}
-                      className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer border-transparent"
+                      className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min border-transparent"
                     >
                       Mark: Ambulance Arriving
                     </button>
@@ -528,7 +789,7 @@ export const DriverDashboard: React.FC = () => {
                   {activeTrip.status === 'ARRIVING' && (
                     <button
                       onClick={() => handleUpdateStatus('IN_TRANSIT')}
-                      className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer border-transparent"
+                      className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min border-transparent"
                     >
                       Patient Picked Up (In Transit)
                     </button>
@@ -537,7 +798,7 @@ export const DriverDashboard: React.FC = () => {
                   {activeTrip.status === 'IN_TRANSIT' && (
                     <button
                       onClick={() => handleUpdateStatus('AT_HOSPITAL')}
-                      className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer border-transparent"
+                      className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min border-transparent"
                     >
                       Arrived at ER (At Hospital)
                     </button>
@@ -546,7 +807,7 @@ export const DriverDashboard: React.FC = () => {
                   {activeTrip.status === 'AT_HOSPITAL' && (
                     <button
                       onClick={() => handleUpdateStatus('COMPLETED')}
-                      className="w-full py-3.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 rounded-xl text-xs font-bold shadow-lg transition-colors border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2 cursor-pointer"
+                      className="w-full py-3.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 rounded-xl text-xs font-bold shadow-lg transition-colors border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2 cursor-pointer touch-target-min"
                     >
                       <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                       Complete Dispatch Log
@@ -724,7 +985,7 @@ export const DriverDashboard: React.FC = () => {
                         {licenseFile ? licenseFile.name : 'Select file (Image/PDF)'}
                       </span>
                       {licenseDocUrl && !licenseFile && (
-                        <a href={`http://localhost:5000${licenseDocUrl}`} target="_blank" rel="noreferrer" className="text-3xs text-blue-450 hover:underline mt-1 font-semibold flex items-center gap-1">
+                        <a href={`${getBackendBaseUrl()}${licenseDocUrl}`} target="_blank" rel="noreferrer" className="text-3xs text-blue-450 hover:underline mt-1 font-semibold flex items-center gap-1">
                           <FileText className="w-3.5 h-3.5" /> View Submitted License
                         </a>
                       )}
@@ -748,7 +1009,7 @@ export const DriverDashboard: React.FC = () => {
                         {registrationFile ? registrationFile.name : 'Select file (Image/PDF)'}
                       </span>
                       {registrationDocUrl && !registrationFile && (
-                        <a href={`http://localhost:5000${registrationDocUrl}`} target="_blank" rel="noreferrer" className="text-3xs text-blue-455 hover:underline mt-1 font-semibold flex items-center gap-1">
+                        <a href={`${getBackendBaseUrl()}${registrationDocUrl}`} target="_blank" rel="noreferrer" className="text-3xs text-blue-455 hover:underline mt-1 font-semibold flex items-center gap-1">
                           <FileText className="w-3.5 h-3.5" /> View Submitted Registration
                         </a>
                       )}
@@ -903,20 +1164,77 @@ export const DriverDashboard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Slide Gestures (Accept / Reject) */}
-              <div className="space-y-3 pt-6 border-t border-slate-800">
-                <SlideToAccept
-                  onTrigger={handleAcceptRequest}
-                  label="Swipe to Accept Emergency"
-                  theme="accept"
-                />
-                
-                <SlideToAccept
-                  onTrigger={handleRejectRequest}
-                  label="Swipe to Decline Request"
-                  theme="reject"
-                />
-              </div>
+              {/* Countdown or Expired Offer State */}
+              {isOfferExpired ? (
+                <div className="space-y-4 pt-6 border-t border-slate-800 text-center animate-fadeIn">
+                  <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-1">
+                    <AlertTriangle className="w-5 h-5 text-amber-400 mx-auto mb-1" />
+                    <strong className="block font-bold">Dispatch Offer Expired</strong>
+                    <p className="text-3xs text-slate-400">
+                      The response window (45 seconds) has elapsed. This emergency request has been automatically re-routed to the next available ambulance in the proximity queue.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIncomingRequest(null)}
+                    className="w-full py-3.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer touch-target-min"
+                  >
+                    Dismiss Notification
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4 pt-5 border-t border-slate-800">
+                  {/* Response Window Countdown Bar */}
+                  <div className="space-y-1.5 bg-slate-950/40 p-3 rounded-xl border border-slate-800">
+                    <div className="flex justify-between items-center text-xs font-bold">
+                      <span className="text-rose-400 flex items-center gap-1.5 text-3xs uppercase tracking-wider">
+                        <Clock className="w-3.5 h-3.5" /> Response Countdown:
+                      </span>
+                      <span className="font-mono text-white text-xs bg-rose-600/30 px-2 py-0.5 rounded-md border border-rose-500/40">
+                        {incomingCountdown}s remaining
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 via-amber-500 to-rose-500 transition-all duration-1000 rounded-full"
+                        style={{ width: `${(incomingCountdown / 45) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Explicit Accept / Decline Buttons (44px touch target) */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={handleAcceptRequest}
+                      className="py-3 px-4 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Accept Emergency
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRejectRequest}
+                      className="py-3 px-4 bg-rose-600/80 hover:bg-rose-600 active:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer touch-target-min"
+                    >
+                      <X className="w-4 h-4" />
+                      Decline Offer
+                    </button>
+                  </div>
+
+                  {/* Optional Slide Gestures */}
+                  <div className="space-y-2 pt-2 border-t border-slate-800/60">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-widest block text-center">
+                      Or swipe to accept
+                    </span>
+                    <SlideToAccept
+                      onTrigger={handleAcceptRequest}
+                      label="Swipe to Accept Emergency"
+                      theme="accept"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

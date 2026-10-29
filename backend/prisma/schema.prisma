@@ -12,17 +12,58 @@ enum Role {
   DRIVER
   ADMIN_HOSPITAL
   SUPER_ADMIN
+  OPERATOR_ADMIN
+}
+
+enum VerificationState {
+  NOT_SUBMITTED
+  PENDING_REVIEW
+  NEEDS_CORRECTION
+  VERIFIED
+  REJECTED
+  SUSPENDED
+  EXPIRED
 }
 
 enum RequestStatus {
   PENDING
+  REQUESTED
+  VALIDATING
+  SEARCHING
+  OFFERED
   ACCEPTED
   ARRIVING
+  AMBULANCE_ARRIVING
+  PATIENT_PICKED_UP
   IN_TRANSIT
   AT_HOSPITAL
+  AT_DESTINATION
   COMPLETED
+  CANCELLED
   REJECTED
+  NO_ELIGIBLE_AMBULANCE
+  EXPIRED
+  FAILED
 }
+
+enum DispatchAttemptStatus {
+  OFFERED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum TripLifecycleStatus {
+  ACCEPTED
+  AMBULANCE_ARRIVING
+  PATIENT_PICKED_UP
+  IN_TRANSIT
+  AT_DESTINATION
+  COMPLETED
+  CANCELLED
+}
+
 
 enum AmbulanceType {
   BASIC_LIFE_SUPPORT
@@ -48,6 +89,7 @@ enum BedStatus {
   CLEANING
   MAINTENANCE
   RESERVED
+  UNAVAILABLE
 }
 
 enum WardType {
@@ -81,6 +123,20 @@ enum TriageLevel {
   GREEN_ROUTINE
 }
 
+enum DataProvenance {
+  PATIENT_REPORTED
+  VERIFIED_CLINICAL
+  UNKNOWN
+}
+
+enum EmergencyAccessType {
+  ACTIVE_DISPATCH_TRIAGE
+  BREAK_GLASS_QR
+  PATIENT_DIRECT_VIEW
+  PUBLIC_QR_SAFETY_CARD
+  HOSPITAL_ADMISSION_TRIAGE
+}
+
 model User {
   id           String          @id @default(uuid())
   name         String
@@ -88,36 +144,89 @@ model User {
   passwordHash String
   role         Role
   phone        String?
+  isPhoneVerified Boolean      @default(false)
+  isEmailVerified Boolean      @default(false)
+  verificationMethod String?   @default("EMAIL")
   googleId     String?
+  supabaseId   String?         @unique
   createdAt    DateTime        @default(now())
   isActive     Boolean         @default(true)
+  isSuspended  Boolean         @default(false)
   hospitalId   String?
+  operatorId   String?
   
   patientProfile   PatientProfile?
+  driverProfile    DriverProfile?
   ambulance        Ambulance?
   hospital         Hospital?
+  managedOperator  AmbulanceOperator?
   driverHospital   Hospital?       @relation("HospitalDrivers", fields: [hospitalId], references: [id], onDelete: SetNull)
+  driverOperator   AmbulanceOperator? @relation("OperatorDrivers", fields: [operatorId], references: [id], onDelete: SetNull)
   
   patientRequests  EmergencyRequest[] @relation("PatientRequests")
   driverRequests   EmergencyRequest[] @relation("DriverRequests")
+  dispatchAttempts DispatchAttempt[]
+  emergencyTrips   EmergencyTrip[]
   healthMetrics    HealthMetric[]
   queueEntries     QueueEntry[]
   hospitalBookings HospitalBooking[]
   activityLogs     ActivityLog[]
   appointments     Appointment[]
   emergencyContacts EmergencyContact[]
+  refreshTokens    RefreshToken[]
+  notifications    Notification[]    @relation("UserNotifications")
+  capacityAuditLogs HospitalCapacityAuditLog[]
+  emergencyHealthAccessLogs EmergencyHealthAccessLog[] @relation("PatientEmergencyAccessLogs")
+  tripShares       EmergencyTripShare[] @relation("PatientTripShares")
 }
 
 model PatientProfile {
-  userId                String   @id
-  bloodGroup            String
-  allergies             String?
-  emergencyContactName  String
-  emergencyContactPhone String
-  medicalNotes          String?
-  customAlertMessage    String?
+  userId                        String          @id
+  bloodGroup                    String?         @default("UNKNOWN")
+  bloodGroupProvenance          DataProvenance  @default(PATIENT_REPORTED)
+  allergies                     String?
+  allergiesProvenance           DataProvenance  @default(PATIENT_REPORTED)
+  medicalConditions             String?
+  medicalConditionsProvenance   DataProvenance  @default(PATIENT_REPORTED)
+  currentMedications            String?
+  medicationsProvenance         DataProvenance  @default(PATIENT_REPORTED)
+  emergencyContactName          String?
+  emergencyContactPhone         String?
+  medicalNotes                  String?
+  customAlertMessage            String?
+  organDonorStatus              String?         // "YES" | "NO" | "NOT_SPECIFIED"
+  preferredHospital             String?
+  consentEmergencySharing       Boolean         @default(true)
+  emergencyAccessToken          String?         @unique
+  tokenGeneratedAt              DateTime?
+  verifiedBy                    String?
+  verifiedAt                    DateTime?
+  createdAt                     DateTime        @default(now())
+  updatedAt                     DateTime        @default(now()) @updatedAt
   
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model EmergencyHealthAccessLog {
+  id              String              @id @default(uuid())
+  patientId       String
+  accessorId      String?             // User ID of responder/accessor (or null if anonymous safety card scan)
+  accessorRole    String              // "PATIENT", "DRIVER", "ADMIN_HOSPITAL", "SUPER_ADMIN", "ANONYMOUS_SCANNER"
+  accessorName    String?
+  organization    String?             // e.g. "Nagpur Emergency Services" or Hospital name
+  accessType      EmergencyAccessType
+  accessReason    String?             // e.g. "Active ambulance dispatch triage", "Patient unconscious at roadside"
+  lawfulBasis     String              @default("CONSENT_DPDP_ACT_2023") // e.g. "CONSENT_DPDP_ACT_2023", "EMERGENCY_MEDICAL_TREATMENT_DPDP_SEC_7"
+  fieldsAccessed  Json?               // Field names returned (e.g. ["bloodGroup", "allergies"]) - NEVER raw health data
+  ipAddress       String?
+  userAgent       String?
+  timestamp       DateTime            @default(now())
+
+  patient         User                @relation("PatientEmergencyAccessLogs", fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId, timestamp])
+  @@index([accessorId])
+  @@index([accessType])
 }
 
 model Ambulance {
@@ -130,14 +239,24 @@ model Ambulance {
   currentLng         Float
   lastUpdated        DateTime           @default(now())
   hospitalId         String?
+  operatorId         String?
   licenseNumber      String?
   licenseDoc         String?
   registrationDoc    String?
   verificationStatus VerificationStatus @default(PENDING)
+  verificationState  VerificationState  @default(PENDING_REVIEW)
   maintenanceStatus  String             @default("GOOD")
+  movementStatus     String             @default("STOPPED")
+  speedKmH           Float?             @default(0)
+  isDemo             Boolean            @default(false)
   
   driver             User?              @relation(fields: [driverId], references: [id], onDelete: SetNull)
   hospital           Hospital?          @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  operator           AmbulanceOperator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  assignments        DriverVehicleAssignment[]
+  dispatchAttempts   DispatchAttempt[]
+  emergencyTrips     EmergencyTrip[]
+  emergencyRequests  EmergencyRequest[]
 }
 
 model Hospital {
@@ -145,10 +264,22 @@ model Hospital {
   name          String
   address       String
   contactNumber String
+  city          String             @default("Nagpur")
+  state         String             @default("Maharashtra")
   lat           Float
   lng           Float
   adminUserId   String             @unique
   availableBeds Int                @default(0)
+  totalBeds     Int                @default(0)
+  capacityLastUpdated DateTime         @default(now())
+  configuredCategories Json?
+  verificationState VerificationState @default(PENDING_REVIEW)
+  isDemo        Boolean            @default(false)
+  aliases       Json?              // ["Alexis Hospital", "Max Hospital Mankapur"]
+  locality      String?            // "Mankapur"
+  specialties   Json?              // ["Cardiac Sciences", "Neurosciences", ...]
+  website       String?
+  sourceUrl     String?
   
   adminUser     User               @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
   requests      EmergencyRequest[]
@@ -159,6 +290,91 @@ model Hospital {
   bookings      HospitalBooking[]
   doctors       Doctor[]
   appointments  Appointment[]
+  driverProfiles DriverProfile[]
+  emergencyTrips EmergencyTrip[]
+  capacityAuditLogs HospitalCapacityAuditLog[]
+}
+
+model AmbulanceOperator {
+  id                String            @id @default(uuid())
+  name              String
+  tradeLicense      String
+  contactPhone      String
+  email             String
+  city              String            @default("Nagpur")
+  state             String            @default("Maharashtra")
+  address           String
+  verificationState VerificationState @default(PENDING_REVIEW)
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  adminUserId       String            @unique
+  isDemo            Boolean           @default(false)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  adminUser         User              @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  ambulances        Ambulance[]
+  drivers           DriverProfile[]
+  userDrivers       User[]            @relation("OperatorDrivers")
+  emergencyRequests EmergencyRequest[]
+  emergencyTrips    EmergencyTrip[]
+}
+
+model DriverProfile {
+  id                 String                    @id @default(uuid())
+  userId             String                    @unique
+  licenseNumber      String
+  licenseExpiry      DateTime?
+  verificationState  VerificationState         @default(PENDING_REVIEW)
+  reviewedBy         String?
+  reviewedAt         DateTime?
+  reviewNotes        String?
+  reviewMethod       String?
+  organizationType   String?                   // "HOSPITAL" | "PRIVATE_OPERATOR" | "INDEPENDENT"
+  hospitalId         String?
+  operatorId         String?
+  membershipStatus   String                    @default("PENDING") // PENDING, APPROVED, REJECTED, SUSPENDED
+  isDispatchEligible Boolean                   @default(false)
+  isDemo             Boolean                   @default(false)
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+
+  user               User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hospital           Hospital?                 @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+  operator           AmbulanceOperator?        @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  assignments        DriverVehicleAssignment[]
+}
+
+model DriverVehicleAssignment {
+  id           String        @id @default(uuid())
+  driverId     String
+  ambulanceId  String
+  isCurrent    Boolean       @default(true)
+  assignedAt   DateTime      @default(now())
+  unassignedAt DateTime?
+
+  driver       DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  ambulance    Ambulance     @relation(fields: [ambulanceId], references: [id], onDelete: Cascade)
+
+  @@index([driverId])
+  @@index([ambulanceId])
+}
+
+model VerificationAuditLog {
+  id               String   @id @default(uuid())
+  actorId          String
+  action           String
+  targetEntityType String
+  targetEntityId   String
+  previousState    String?
+  newState         String
+  reviewMethod     String
+  notes            String?
+  isSimulated      Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  @@index([targetEntityType, targetEntityId])
+  @@index([actorId])
 }
 
 model HospitalBed {
@@ -166,6 +382,7 @@ model HospitalBed {
   hospitalId       String
   bedNumber        String       // e.g. "ER-01", "ICU-02", "TR-01", "GW-101"
   ward             WardType     @default(EMERGENCY_ER)
+  category         String?      // e.g. "ICU", "EMERGENCY", "GENERAL", "PEDIATRIC", "TRAUMA", "SURGICAL"
   status           BedStatus    @default(AVAILABLE)
   patientName      String?
   patientId        String?
@@ -175,6 +392,7 @@ model HospitalBed {
   notes            String?
   admittedAt       DateTime?
   lastCleanedAt    DateTime?
+  updatedAt        DateTime     @default(now()) @updatedAt
   createdAt        DateTime     @default(now())
 
   hospital         Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
@@ -205,22 +423,143 @@ model HospitalBooking {
 }
 
 model EmergencyRequest {
-  id          String        @id @default(uuid())
-  patientId   String
-  driverId    String?
-  hospitalId  String
-  pickupLat   Float
-  pickupLng   Float
-  status      RequestStatus @default(PENDING)
-  tripType    TripType      @default(STANDARD)
-  etaMinutes  Int?
-  assignedBay String?       // e.g. "ER Trauma Bay 1" or "Resus Bay A"
-  createdAt   DateTime      @default(now())
-  completedAt DateTime?
+  id                    String              @id @default(uuid())
+  patientId             String
+  driverId              String?
+  hospitalId            String?
+  ambulanceId           String?
+  operatorId            String?
+  pickupLat             Float
+  pickupLng             Float
+  pickupAddress         String?
+  destinationLat        Float?
+  destinationLng        Float?
+  destinationAddress    String?
+  status                RequestStatus       @default(REQUESTED)
+  tripType              TripType            @default(SOS)
+  category              String?             // "CARDIAC", "TRAUMA", "RESPIRATORY", "PREGNANCY", "GENERAL"
+  urgencyLevel          String?             // "CRITICAL", "HIGH", "MODERATE"
+  requiredAmbulanceType AmbulanceType       @default(BASIC_LIFE_SUPPORT)
+  etaMinutes            Int?
+  assignedBay           String?             // e.g. "ER Trauma Bay 1" or "Resus Bay A"
+  isDemo                Boolean             @default(false)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  completedAt           DateTime?
   
-  patient     User          @relation("PatientRequests", fields: [patientId], references: [id], onDelete: Cascade)
-  driver      User?         @relation("DriverRequests", fields: [driverId], references: [id], onDelete: SetNull)
-  hospital    Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient               User                @relation("PatientRequests", fields: [patientId], references: [id], onDelete: Cascade)
+  driver                User?               @relation("DriverRequests", fields: [driverId], references: [id], onDelete: SetNull)
+  hospital              Hospital?           @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+  ambulance             Ambulance?          @relation(fields: [ambulanceId], references: [id], onDelete: SetNull)
+  operator              AmbulanceOperator?  @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  dispatchAttempts      DispatchAttempt[]
+  trip                  EmergencyTrip?
+  events                EmergencyEvent[]
+  tripShares            EmergencyTripShare[]
+
+  @@index([patientId])
+  @@index([driverId])
+  @@index([hospitalId])
+  @@index([status])
+}
+
+model ServiceArea {
+  id        String   @id @default(uuid())
+  name      String
+  city      String   @default("Nagpur")
+  state     String   @default("Maharashtra")
+  country   String   @default("India")
+  centerLat Float    @default(21.1458)
+  centerLng Float    @default(79.0882)
+  radiusKm  Float    @default(30.0)
+  isActive  Boolean  @default(true)
+  isPilot   Boolean  @default(true)
+  metadata  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DispatchAttempt {
+  id              String                @id @default(uuid())
+  requestId       String
+  ambulanceId     String
+  driverId        String
+  status          DispatchAttemptStatus @default(OFFERED)
+  distanceKm      Float
+  isStraightLine  Boolean               @default(true)
+  offeredAt       DateTime              @default(now())
+  expiresAt       DateTime
+  respondedAt     DateTime?
+  rejectionReason String?
+  isDemo          Boolean               @default(false)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  request         EmergencyRequest      @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  ambulance       Ambulance             @relation(fields: [ambulanceId], references: [id], onDelete: Cascade)
+  driver          User                  @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@index([ambulanceId])
+  @@index([driverId])
+  @@index([status])
+}
+
+model EmergencyTrip {
+  id                 String              @id @default(uuid())
+  requestId          String              @unique
+  ambulanceId        String
+  driverId           String
+  hospitalId         String?
+  operatorId         String?
+  pickupLat          Float
+  pickupLng          Float
+  pickupAddress      String?
+  destinationLat     Float?
+  destinationLng     Float?
+  destinationAddress String?
+  status             TripLifecycleStatus @default(ACCEPTED)
+  startedAt          DateTime            @default(now())
+  arrivedAt          DateTime?
+  pickedUpAt         DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  cancelReason       String?
+  isDemo             Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  request            EmergencyRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  ambulance          Ambulance           @relation(fields: [ambulanceId], references: [id], onDelete: Cascade)
+  driver             User                @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  hospital           Hospital?           @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+  operator           AmbulanceOperator?  @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+  events             EmergencyEvent[]
+
+  @@index([ambulanceId])
+  @@index([driverId])
+  @@index([status])
+}
+
+model EmergencyEvent {
+  id            String            @id @default(uuid())
+  requestId     String
+  tripId        String?
+  eventType     String
+  actorId       String?
+  actorRole     String?
+  previousState String?
+  newState      String?
+  metadata      String?
+  isDemo        Boolean           @default(false)
+  timestamp     DateTime          @default(now())
+
+  request       EmergencyRequest  @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  trip          EmergencyTrip?    @relation(fields: [tripId], references: [id], onDelete: SetNull)
+
+  @@index([requestId])
+  @@index([tripId])
+  @@index([eventType])
 }
 
 enum QueueStatus {
@@ -300,8 +639,13 @@ model HospitalRegistration {
 
 enum AppointmentStatus {
   BOOKED
+  CONFIRMED
+  CHECKED_IN
+  IN_CONSULTATION
   COMPLETED
   CANCELLED
+  RESCHEDULED
+  NO_SHOW
 }
 
 model Doctor {
@@ -313,70 +657,548 @@ model Doctor {
   experienceYears Int?          @default(0)
   consultationFee Float?        @default(0)
   isActive        Boolean       @default(true)
+  unavailableDates String[]     @default([])
+  defaultSlotDuration Int?      @default(15)
+  designation     String?
+  profileUrl      String?
+  imageUrl        String?
+  sourceUrl       String?
+  sourceRetrievedAt DateTime?
+  verificationStatus String?    @default("VERIFIED_PARTNER")
+  bookingEnabled  Boolean       @default(true)
+  registrationNumber String?
+  registrationAuthority String? @default("Maharashtra Medical Council")
+  specialtiesList Json?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
   hospital        Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   slots           DoctorSlot[]
   appointments    Appointment[]
+  affiliations    HospitalDoctor[]
 
   @@index([hospitalId])
   @@index([specialization])
 }
 
-model DoctorSlot {
-  id           String        @id @default(uuid())
-  doctorId     String
-  date         String        // "YYYY-MM-DD"
-  startTime    String        // e.g. "09:00"
-  endTime      String        // e.g. "10:00"
-  maxPatients  Int           @default(5)
-  bookedCount  Int           @default(0)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+model HospitalDoctor {
+  id                String    @id @default(uuid())
+  hospitalId        String
+  doctorId          String
+  affiliationStatus String    @default("AFFILIATED")
+  affiliationSource String    @default("OFFICIAL_HOSPITAL_DIRECTORY")
+  sourceUrl         String?
+  lastVerifiedAt    DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  doctor       Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  appointments Appointment[]
+  doctor            Doctor    @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  @@unique([hospitalId, doctorId])
+  @@index([hospitalId])
+  @@index([doctorId])
+}
+
+model DoctorSlot {
+  id                  String        @id @default(uuid())
+  doctorId            String
+  date                String        // "YYYY-MM-DD"
+  startTime           String        // e.g. "09:00"
+  endTime             String        // e.g. "10:00"
+  maxPatients         Int           @default(5)
+  bookedCount         Int           @default(0)
+  slotDurationMinutes Int?          @default(15)
+  isBlocked           Boolean       @default(false)
+  blockedReason       String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  doctor              Doctor        @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  appointments        Appointment[]
 
   @@unique([doctorId, date, startTime])
   @@index([doctorId, date])
 }
 
 model Appointment {
-  id           String            @id @default(uuid())
-  hospitalId   String
-  doctorId     String
-  slotId       String
-  patientId    String
-  tokenNumber  Int
-  status       AppointmentStatus @default(BOOKED)
-  symptoms     String?
-  notes        String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  id                    String            @id @default(uuid())
+  hospitalId            String
+  doctorId              String
+  slotId                String
+  patientId             String
+  tokenNumber           Int
+  tokenString           String?
+  status                AppointmentStatus @default(BOOKED)
+  symptoms              String?
+  notes                 String?
+  rescheduledFromSlotId String?
+  rescheduledAt         DateTime?
+  cancellationReason    String?
+  confirmedAt           DateTime?
+  checkedInAt           DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
 
-  hospital     Hospital          @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
-  doctor       Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  slot         DoctorSlot        @relation(fields: [slotId], references: [id], onDelete: Cascade)
-  patient      User              @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  hospital              Hospital          @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctor                Doctor            @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  slot                  DoctorSlot        @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  patient               User              @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  auditLogs             AppointmentAuditLog[]
 
   @@unique([slotId, tokenNumber])
   @@index([patientId])
   @@index([hospitalId])
   @@index([doctorId])
+  @@index([status])
+}
+
+model AppointmentAuditLog {
+  id             String       @id @default(uuid())
+  appointmentId  String
+  hospitalId     String
+  doctorId       String?
+  patientId      String?
+  action         String       // 'CREATED' | 'CONFIRMED' | 'CANCELLED' | 'RESCHEDULED' | 'STATUS_UPDATED' | 'SLOT_BLOCKED' | 'SLOT_UNBLOCKED'
+  previousStatus String?
+  newStatus      String?
+  actorId        String?
+  actorRole      String?
+  actorName      String?
+  reason         String?
+  metadata       Json?
+  timestamp      DateTime     @default(now())
+
+  appointment    Appointment? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([hospitalId])
+  @@index([doctorId])
+  @@index([action])
+  @@index([timestamp])
 }
 
 model EmergencyContact {
-  id        String   @id @default(uuid())
-  patientId String
-  name      String
-  phone     String
-  relation  String?  // e.g. "Parent", "Spouse", "Sibling", "Friend"
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                    String              @id @default(uuid())
+  patientId             String
+  name                  String
+  phone                 String
+  email                 String?
+  relation              String?             // e.g. "Parent", "Spouse", "Sibling", "Friend"
+  isVerified            Boolean             @default(false)
+  verifiedAt            DateTime?
+  canReceiveTripUpdates Boolean             @default(true)
+  notifyOnSos           Boolean             @default(true)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
 
-  patient   User     @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patient               User                @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  tripShares            EmergencyTripShare[]
 
   @@index([patientId])
 }
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  userId     String
+  tokenHash  String   @unique
+  isRevoked  Boolean  @default(false)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  replacedBy String?
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+enum NotificationChannel {
+  IN_APP
+  SOCKET
+  SMS
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  QUEUED
+  PROCESSING
+  ATTEMPTED
+  DELIVERED
+  FAILED
+  UNKNOWN
+  EXPIRED
+}
+
+model Notification {
+  id             String              @id @default(uuid())
+  recipientId    String              // User ID or authorized recipient
+  recipientRole  String?             // PATIENT, DRIVER, ADMIN_HOSPITAL, etc.
+  title          String
+  message        String
+  type           String              // APPOINTMENT_CONFIRMED, DISPATCH_OFFER, etc.
+  priority       String              @default("NORMAL") // LOW, NORMAL, HIGH, CRITICAL
+  channel        NotificationChannel @default(IN_APP)
+  status         NotificationStatus  @default(PENDING)
+  isRead         Boolean             @default(false)
+  readAt         DateTime?
+  eventSource    String?             // e.g. "appointment.created", "dispatch.offered"
+  entityType     String?             // "APPOINTMENT", "EMERGENCY_REQUEST", "HOSPITAL", etc.
+  entityId       String?             // Associated entity ID
+  hospitalId     String?             // For hospital isolation
+  operatorId     String?             // For operator isolation
+  doctorId       String?             // For doctor isolation
+  data           Json?               // Sanitized payload
+  idempotencyKey String?             @unique // Prevents duplicate events
+  retryCount     Int                 @default(0)
+  maxRetries     Int                 @default(3)
+  lastError      String?
+  expiresAt      DateTime?           // For obsolete dispatch offers
+  deliveredAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  recipient      User                @relation("UserNotifications", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, isRead])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model HospitalCapacityAuditLog {
+  id                String   @id @default(uuid())
+  hospitalId        String
+  changedById       String
+  changedByName     String
+  changedByRole     String
+  action            String   // "CAPACITY_CONFIG_UPDATED", "BED_STATUS_CHANGED", "BED_ADDED", "BED_REMOVED", "PATIENT_ADMITTED", "PATIENT_DISCHARGED"
+  category          String?  // "ICU", "GENERAL", "EMERGENCY", "PEDIATRIC", "ALL"
+  previousAvailable Int
+  newAvailable      Int
+  previousTotal     Int
+  newTotal          Int
+  previousOccupied  Int?
+  newOccupied       Int?
+  reason            String?
+  metadata          Json?
+  timestamp         DateTime @default(now())
+
+  hospital          Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  changedBy         User     @relation(fields: [changedById], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, timestamp])
+  @@index([changedById])
+}
+
+model EmergencyTripShare {
+  id                       String              @id @default(uuid())
+  requestId                String
+  tripId                   String?
+  patientId                String
+  contactId                String?
+  recipientName            String?
+  recipientPhone           String?
+  recipientEmail           String?
+  shareToken               String              @unique
+  status                   String              @default("ACTIVE") // "ACTIVE", "REVOKED", "EXPIRED", "COMPLETED"
+  allowLiveLocation        Boolean             @default(true)
+  allowDestinationHospital  Boolean             @default(true)
+  expiresAt                DateTime
+  revokedAt                DateTime?
+  revokedReason            String?
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+
+  request                  EmergencyRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  patient                  User                @relation("PatientTripShares", fields: [patientId], references: [id], onDelete: Cascade)
+  contact                  EmergencyContact?   @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  auditLogs                EmergencyTripShareAuditLog[]
+
+  @@index([requestId])
+  @@index([patientId])
+  @@index([shareToken])
+  @@index([status])
+}
+
+model EmergencyTripShareAuditLog {
+  id             String              @id @default(uuid())
+  shareId        String?
+  shareToken     String?
+  requestId      String
+  patientId      String
+  action         String              // "SHARE_CREATED", "SHARE_ACCESSED", "SHARE_REVOKED", "SHARE_EXPIRED", "LOCATION_STREAM_ACCESSED", "TRUSTED_CONTACT_ADDED", "TRUSTED_CONTACT_UPDATED", "TRUSTED_CONTACT_REMOVED"
+  actorId        String?
+  actorRole      String?             // "PATIENT", "TRUSTED_CONTACT", "ANONYMOUS", "SYSTEM"
+  actorName      String?
+  ipAddress      String?
+  userAgent      String?
+  details        Json?
+  timestamp      DateTime            @default(now())
+
+  share          EmergencyTripShare? @relation(fields: [shareId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, timestamp])
+  @@index([patientId])
+  @@index([shareId])
+  @@index([action])
+}
+
+model DirectoryFacility {
+  id                        String    @id @default(uuid())
+  name                      String
+  alternateNames            Json?     // ["GMCH", "Government Medical College Nagpur"]
+  recordType                String    @default("HOSPITAL") // HOSPITAL, AMBULANCE_PROVIDER, OFFICIAL_EMERGENCY_HELPLINE
+  recordStatus              String    @default("ACTIVE")   // ACTIVE, NEEDS_VERIFICATION, INACTIVE, DUPLICATE
+  facilityType              String    // GOVERNMENT_HOSPITAL, MEDICAL_COLLEGE, PRIVATE_MULTISPECIALTY, PRIVATE_SPECIALTY, PRIMARY_HEALTH_CENTRE, COMMUNITY_HEALTH_CENTRE, RURAL_HOSPITAL, MUNICIPAL_HOSPITAL
+  ownership                 String    // GOVERNMENT_STATE, GOVERNMENT_CENTRAL, MUNICIPAL, PRIVATE_TRUST, PRIVATE_CORPORATE, UNKNOWN
+  contactNumber             String
+  rawContactNumber          String?
+  alternateNumber           String?
+  address                   String
+  locality                  String?
+  tehsil                    String?   @default("Nagpur Urban")
+  coverageGroup             String?   @default("NAGPUR_CITY") // NAGPUR_CITY, NAGPUR_DISTRICT_RURAL
+  city                      String    @default("Nagpur")
+  district                  String    @default("Nagpur")
+  state                     String    @default("Maharashtra")
+  pincode                   String?
+  lat                       Float?
+  lng                       Float?
+  isGeocoded                Boolean   @default(false)
+  coordinateQuality         String?   // EXACT_ROOFTOP, LOCALITY_APPROXIMATE, UNVERIFIED
+  website                   String?
+  emergencyHelpline         String?
+  emergencyPhone            String?
+  ambulancePhone            String?
+  publicEmail               String?
+  specialties               Json?
+  emergencyServicesClaimed  Boolean   @default(false)
+  sourceUrl                 String
+  sourceType                String?   // OFFICIAL_GOVERNMENT_PORTAL, COMMERCIAL_DIRECTORY_LISTING, HOSPITAL_OFFICIAL_WEBSITE, EMERGENCY_SERVICES_DIRECTORY
+  sourceRetrievedAt         DateTime? @default(now())
+  dataProvenance            String?   // Audit notes describing data source & limitations
+  dataConfidence            String?   @default("DIRECTORY_LISTED") // GOVERNMENT_CONFIRMED, OFFICIAL_PROVIDER_PUBLISHED, DIRECTORY_LISTED, CONTACT_CONFIRMED, UNVERIFIED
+  lastCheckedAt             DateTime? @default(now())
+  lastVerifiedAt            DateTime  @default(now())
+  verificationStatus        String    @default("UNVERIFIED") // VERIFIED, PENDING_REVIEW, FLAGGED, OUTDATED
+  contactVerificationStatus String    @default("NEEDS_VERIFICATION") // VERIFIED, NEEDS_VERIFICATION, UNVERIFIED, SUSPECT
+  lastContactVerifiedAt     DateTime?
+  linkStatus                String    @default("UNLINKED")   // UNLINKED, CLAIM_PENDING, LINKED_PARTNER
+  onboardingStatus          String    @default("PUBLIC_DIRECTORY_RECORD") // PUBLIC_DIRECTORY_RECORD, CONTACT_INFO_CHECKED, ONBOARDING_REQUESTED, DOCUMENTS_SUBMITTED, UNDER_REVIEW, APPROVED, SUSPENDED
+  contactCheckedAt          DateTime?
+  contactCheckedBy          String?
+  linkedHospitalId          String?
+  reviewNotes               String?
+  isDuplicate               Boolean   @default(false)
+  duplicateOfId             String?
+  duplicateGroup            String?
+  notes                     String?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  @@index([city, district])
+  @@index([facilityType])
+  @@index([recordType])
+  @@index([recordStatus])
+  @@index([verificationStatus])
+  @@index([linkStatus])
+  @@index([onboardingStatus])
+  @@index([coverageGroup])
+  @@index([tehsil])
+}
+
+model DirectoryAmbulanceService {
+  id                                  String    @id @default(uuid())
+  serviceName                         String
+  recordType                          String    @default("AMBULANCE_PROVIDER") // HOSPITAL, AMBULANCE_PROVIDER, OFFICIAL_EMERGENCY_HELPLINE
+  recordStatus                        String    @default("ACTIVE")             // ACTIVE, NEEDS_VERIFICATION, INACTIVE, DUPLICATE
+  operatorType                        String    // PUBLIC_EMERGENCY_SERVICE, HOSPITAL_OPERATED, PRIVATE_OPERATOR, CHARITABLE_TRUST
+  contactNumber                       String
+  rawContactNumber                    String?
+  alternateContact                    String?
+  publicBusinessPhone                 String?
+  alternatePublicPhone                String?
+  address                             String?
+  businessAddress                     String?
+  locality                            String?
+  tehsil                              String?   @default("Nagpur Urban")
+  coverageGroup                       String?   @default("NAGPUR_CITY") // NAGPUR_CITY, NAGPUR_DISTRICT_RURAL
+  city                                String    @default("Nagpur")
+  district                            String    @default("Nagpur")
+  state                               String    @default("Maharashtra")
+  operatingArea                       String?   // "Nagpur Urban", "Nagpur District Wide"
+  serviceArea                         String?
+  advertisedServiceTypes              Json?
+  advertisedIcuOrVentilatorCapability Boolean   @default(false)
+  lat                                 Float?
+  lng                                 Float?
+  isGeocoded                          Boolean   @default(false)
+  coordinateQuality                   String?   // EXACT_ROOFTOP, LOCALITY_APPROXIMATE, UNVERIFIED
+  website                             String?
+  fleetDescription                    String?
+  sourceUrl                           String
+  sourceType                          String?   // OFFICIAL_GOVERNMENT_PORTAL, COMMERCIAL_DIRECTORY_LISTING, EMERGENCY_SERVICES_DIRECTORY
+  sourceRetrievedAt                   DateTime? @default(now())
+  dataProvenance                      String?   // Audit notes describing data source & limitations
+  dataConfidence                      String?   @default("DIRECTORY_LISTED") // GOVERNMENT_CONFIRMED, OFFICIAL_PROVIDER_PUBLISHED, DIRECTORY_LISTED, CONTACT_CONFIRMED, UNVERIFIED
+  lastCheckedAt                       DateTime? @default(now())
+  lastVerifiedAt                      DateTime  @default(now())
+  verificationStatus                  String    @default("UNVERIFIED") // VERIFIED, PENDING_REVIEW, FLAGGED
+  contactVerificationStatus           String    @default("NEEDS_VERIFICATION") // VERIFIED, NEEDS_VERIFICATION, UNVERIFIED, SUSPECT
+  lastContactVerifiedAt               DateTime?
+  linkStatus                          String    @default("UNLINKED")   // UNLINKED, CLAIM_PENDING, LINKED_PARTNER
+  onboardingStatus                    String    @default("PUBLIC_DIRECTORY_RECORD") // PUBLIC_DIRECTORY_RECORD, CONTACT_INFO_CHECKED, ONBOARDING_REQUESTED, DOCUMENTS_SUBMITTED, UNDER_REVIEW, APPROVED, SUSPENDED
+  contactCheckedAt                    DateTime?
+  contactCheckedBy                    String?
+  linkedOperatorId                    String?
+  linkedHospitalId                    String?
+  reviewNotes                         String?
+  isDuplicate                         Boolean   @default(false)
+  duplicateOfId                       String?
+  notes                               String?
+  createdAt                           DateTime  @default(now())
+  updatedAt                           DateTime  @updatedAt
+
+  @@index([city, district])
+  @@index([operatorType])
+  @@index([recordType])
+  @@index([coverageGroup])
+  @@index([tehsil])
+  @@index([recordStatus])
+  @@index([verificationStatus])
+  @@index([onboardingStatus])
+}
+
+model DirectoryReviewIssue {
+  id                  String    @id @default(uuid())
+  entityType          String    // "FACILITY" | "AMBULANCE_SERVICE"
+  entityId            String
+  issueType           String    // "SUSPICIOUS_COORDINATES", "POTENTIAL_DUPLICATE", "INVALID_PHONE", "MISSING_COORDINATES", "OUTDATED_RECORD", "USER_REPORTED_ERROR"
+  severity            String    // "HIGH", "MEDIUM", "LOW"
+  description         String
+  suggestedCorrection Json?
+  status              String    @default("OPEN") // "OPEN", "RESOLVED", "IGNORED"
+  reportedBy          String?   // "SYSTEM_VALIDATOR" | User ID
+  resolvedBy          String?
+  resolvedAt          DateTime?
+  createdAt           DateTime  @default(now())
+
+  @@index([entityType, entityId])
+  @@index([status])
+  @@index([issueType])
+}
+
+model HospitalOnboardingApplication {
+  id                    String            @id @default(uuid())
+  hospitalName          String
+  registrationNumber    String            // Clinical Establishments Act / Bombay Nursing Home Act
+  contactPersonName     String
+  designation           String
+  contactPhone          String
+  email                 String
+  address               String
+  city                  String            @default("Nagpur")
+  district              String            @default("Nagpur")
+  state                 String            @default("Maharashtra")
+  lat                   Float?
+  lng                   Float?
+  servicesOffered       Json?             // ["EMERGENCY_ER", "ICU", "TRAUMA", "CARDIAC", "NEUROLOGY", "PEDIATRICS"]
+  bedCapacityTotal      Int               @default(0)
+  bedCapacityIcu        Int               @default(0)
+  bedCapacityEr         Int               @default(0)
+  documents             Json?             // [{ docType, fileUrl, docNumber, expiryDate, isVerified }]
+  status                String            @default("SUBMITTED") // DRAFT, SUBMITTED, UNDER_REVIEW, NEEDS_MORE_INFO, APPROVED, REJECTED, SUSPENDED
+  applicantUserId       String
+  directoryFacilityId   String?
+  reviewerId            String?
+  reviewerNotes         String?
+  reviewedAt            DateTime?
+  rejectionReason       String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([status])
+  @@index([applicantUserId])
+}
+
+model OperatorOnboardingApplication {
+  id                    String            @id @default(uuid())
+  operatorName          String
+  tradeLicense          String
+  contactPersonName     String
+  designation           String
+  contactPhone          String
+  email                 String
+  address               String
+  city                  String            @default("Nagpur")
+  district              String            @default("Nagpur")
+  state                 String            @default("Maharashtra")
+  operatingArea         String            @default("Nagpur District Wide")
+  declaredFleetSize     Int               @default(1)
+  documents             Json?             // [{ docType, fileUrl, docNumber, expiryDate, isVerified }]
+  status                String            @default("SUBMITTED") // DRAFT, SUBMITTED, UNDER_REVIEW, NEEDS_MORE_INFO, APPROVED, REJECTED, SUSPENDED
+  applicantUserId       String
+  directoryAmbulanceId  String?
+  reviewerId            String?
+  reviewerNotes         String?
+  reviewedAt            DateTime?
+  rejectionReason       String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([status])
+  @@index([applicantUserId])
+}
+
+model DriverVerificationApplication {
+  id                    String            @id @default(uuid())
+  driverUserId          String
+  fullName              String
+  phone                 String
+  licenseNumber         String
+  licenseExpiry         DateTime
+  badgeNumber           String?           // Commercial transport driver badge
+  organizationType      String            // "HOSPITAL" | "PRIVATE_OPERATOR"
+  organizationId        String
+  documents             Json?             // [{ docType, fileUrl, docNumber, expiryDate, isVerified }]
+  status                String            @default("SUBMITTED") // DRAFT, SUBMITTED, PENDING_REVIEW, NEEDS_MORE_INFO, APPROVED, REJECTED, SUSPENDED, EXPIRED, REVOKED
+  reviewerId            String?
+  reviewerNotes         String?
+  reviewedAt            DateTime?
+  rejectionReason       String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([status])
+  @@index([driverUserId])
+  @@index([organizationId])
+}
+
+model PilotActivationChecklist {
+  id                    String            @id @default(uuid())
+  organizationType      String            // "HOSPITAL" | "PRIVATE_OPERATOR"
+  organizationId        String            @unique
+  organizationName      String
+  serviceAreaId         String            @default("nagpur-pilot-service-area")
+  isOrgApproved         Boolean           @default(false)
+  verifiedFleetCount    Int               @default(0)
+  verifiedDriverCount   Int               @default(0)
+  activeAssignmentsCount Int              @default(0)
+  hasRecentGpsPing      Boolean           @default(false)
+  dispatchTestPassed    Boolean           @default(false)
+  activationStatus      String            @default("APPROVED_NOT_ACTIVATED") // DIRECTORY_ONLY, ONBOARDING_IN_PROGRESS, VERIFICATION_PENDING, APPROVED_NOT_ACTIVATED, PILOT_ACTIVE, TEMPORARILY_SUSPENDED, DEACTIVATED
+  activatedBy           String?
+  activatedAt           DateTime?
+  deactivatedReason     String?
+  notes                 String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([activationStatus])
+  @@index([serviceAreaId])
+}
+
+
 

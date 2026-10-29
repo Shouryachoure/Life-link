@@ -24,8 +24,11 @@ import {
   Heart,
   Settings,
   AlertCircle,
-  Activity
+  Activity,
+  ShieldCheck
 } from 'lucide-react';
+import { SystemHealthModal } from '../components/ui/SystemHealthModal';
+import { ThemeToggle } from '../components/ui/ThemeToggle';
 
 // -------------------------------------------------------------
 // Shared Primitive Components
@@ -216,6 +219,7 @@ export const Landing: React.FC = () => {
   const [activeDispatch, setActiveDispatch] = useState<DispatchAlert>(mockDispatches[0]);
   const [dispatches, setDispatches] = useState<DispatchAlert[]>(mockDispatches);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [healthModalOpen, setHealthModalOpen] = useState(false);
 
   // Mark dispatch as read when clicked
   const handleSelectDispatch = (msg: DispatchAlert) => {
@@ -290,6 +294,14 @@ export const Landing: React.FC = () => {
 
         {/* Right Nav Action */}
         <div className="hidden md:flex items-center gap-3">
+          <ThemeToggle />
+          <button
+            onClick={() => setHealthModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-semibold font-mono transition-colors cursor-pointer"
+          >
+            <Activity className="w-3.5 h-3.5 animate-pulse" />
+            <span>System Health</span>
+          </button>
           <Link to="/register-hospital" className="text-white/70 hover:text-emerald-400 text-xs font-semibold px-2.5 py-1.5 transition-colors">
             Register Hospital
           </Link>
@@ -333,6 +345,17 @@ export const Landing: React.FC = () => {
                 {link}
               </a>
             ))}
+            <div className="flex items-center justify-between py-2 border-b border-white/5">
+              <span className="text-white/70 text-xs font-semibold">Theme</span>
+              <ThemeToggle />
+            </div>
+            <button
+              onClick={() => { setMobileMenuOpen(false); setHealthModalOpen(true); }}
+              className="w-full flex items-center justify-center gap-2 text-rose-400 bg-rose-950/20 border border-rose-500/20 text-xs font-bold py-2.5 rounded-xl font-mono cursor-pointer"
+            >
+              <Activity className="w-4 h-4 animate-pulse" />
+              <span>System Health Diagnostic</span>
+            </button>
             <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5">
               <Link to="/register-hospital" onClick={() => setMobileMenuOpen(false)} className="flex items-center justify-center text-emerald-400 bg-emerald-950/20 border border-emerald-500/20 text-2xs font-bold py-2.5 rounded-xl">
                 Register Hospital
@@ -453,8 +476,9 @@ export const Landing: React.FC = () => {
               <span className="w-3 h-3 rounded-full bg-[#febc2e] cursor-pointer" />
               <span className="w-3 h-3 rounded-full bg-[#28c840] cursor-pointer" />
             </div>
-            <span className="text-[10px] font-bold text-white/40 uppercase tracking-widest font-mono">
-              LifeLink — Live Dispatch Console
+            <span className="text-[10px] font-bold text-amber-400 uppercase tracking-widest font-mono flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              Demo Simulation Data — Dispatch Console Preview
             </span>
             <div className="w-12" /> {/* spacer */}
           </div>
@@ -700,8 +724,8 @@ export const Landing: React.FC = () => {
           {/* Right Column Layout Card */}
           <div className="liquid-glass rounded-3xl p-6 md:p-8 space-y-6 shadow-2xl">
             <div className="flex items-center justify-between">
-              <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500 font-mono">
-                Today · 42 emergency dispatches triaged
+              <span className="text-[10px] font-extrabold uppercase tracking-widest text-amber-400 font-mono">
+                SIMULATED DATA · 42 DEMO DISPATCHES TRIAGED
               </span>
               <span className="w-2 h-2 rounded-full bg-rose-600 animate-pulse" />
             </div>
@@ -784,27 +808,30 @@ export const Landing: React.FC = () => {
               desc: "Request SOS triggers, configure emergency contacts, and monitor real-time ambulance dispatch telemetry.",
               loginPath: "/login",
               registerPath: "/register",
+              registerLabel: "Patient Sign Up",
               icon: <User className="w-6 h-6 text-rose-500" />
             },
             {
               role: "Ambulance Driver",
-              desc: "Toggle active duty availability, accept hospital dispatches, and broadcast turn-by-turn road paths.",
+              desc: "Toggle active duty availability, accept hospital dispatches, and broadcast authentic turn-by-turn road coordinates.",
               loginPath: "/login",
               registerPath: "/register",
+              registerLabel: "Driver Sign Up",
               icon: <Truck className="w-6 h-6 text-amber-500" />
             },
             {
-              role: "Hospital ER Admin",
-              desc: "Manage live bed waitlist queues, verify incoming driver credentials, and audit incoming vitals.",
+              role: "Hospital Administrator",
+              desc: "Manage live bed allocations, verify incoming driver credentials, and coordinate trauma bay admissions.",
               loginPath: "/admin/login",
+              registerPath: "/register-hospital",
+              registerLabel: "Register Facility",
               icon: <Building className="w-6 h-6 text-cyan-400" />
             },
             {
-              role: "Hospital Network",
-              desc: "Join LifeLink emergency network. Submit your healthcare facility registration for verified dispatch integration.",
-              loginPath: "/admin/login",
-              registerPath: "/register-hospital",
-              icon: <Building className="w-6 h-6 text-emerald-400" />
+              role: "Super Administrator",
+              desc: "Oversee municipal emergency fleet, approve hospital registrations, audit dispatch logs, and manage system security.",
+              loginPath: "/super-admin/login",
+              icon: <ShieldCheck className="w-6 h-6 text-purple-400" />
             }
           ].map((card, idx) => (
             <motion.div
@@ -838,17 +865,14 @@ export const Landing: React.FC = () => {
                     to={card.registerPath} 
                     className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl border border-white/10 text-white font-bold text-[10px] uppercase tracking-wider hover:bg-white/5 transition-colors"
                   >
-                    <span>Register</span>
+                    <span>{card.registerLabel || "Register"}</span>
                     <ChevronRight className="w-3.5 h-3.5" />
                   </Link>
                 ) : (
-                  <Link 
-                    to={card.loginPath} 
-                    className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl border border-white/10 text-white/70 hover:text-white font-bold text-[10px] uppercase tracking-wider hover:bg-white/5 transition-colors"
-                  >
-                    <span>Staff Sign In</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </Link>
+                  <div className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl border border-white/5 text-white/40 text-[10px] uppercase tracking-wider font-mono">
+                    <span>Authorized Staff Only</span>
+                    <ShieldAlert className="w-3.5 h-3.5" />
+                  </div>
                 )}
               </div>
             </motion.div>
@@ -957,13 +981,21 @@ export const Landing: React.FC = () => {
           <span>&copy; 2026 LifeLink Inc.</span>
         </div>
         <div className="flex gap-6 items-center flex-wrap">
+          <button onClick={() => setHealthModalOpen(true)} className="text-rose-400 hover:text-rose-300 transition-colors flex items-center gap-1 cursor-pointer">
+            <Activity className="w-3 h-3 animate-pulse" />
+            <span>System Health</span>
+          </button>
           <Link to="/register-hospital" className="text-emerald-400/80 hover:text-emerald-300 transition-colors">Register Hospital</Link>
           <Link to="/admin/login" className="text-white/60 hover:text-white transition-colors">Hospital Staff Portal</Link>
+          <Link to="/super-admin/login" className="text-purple-400/80 hover:text-purple-300 transition-colors">Super Admin</Link>
           <a href="#privacy" className="hover:text-white transition-colors">Privacy</a>
           <a href="#terms" className="hover:text-white transition-colors">Terms</a>
           <a href="#security" className="hover:text-white transition-colors">Security</a>
         </div>
       </footer>
+
+      {/* System Health Diagnostic Modal */}
+      <SystemHealthModal isOpen={healthModalOpen} onClose={() => setHealthModalOpen(false)} />
 
     </div>
   );

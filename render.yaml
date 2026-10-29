@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: lifelink-backend
+    runtime: node
+    plan: free
+    region: singapore # Low-latency routing for India / Maharashtra
+    rootDir: backend
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: node dist/server.js
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: USE_IN_MEMORY_DB
+        value: "false"
+      - key: DATABASE_URL
+        sync: false # Set in Render Dashboard from Supabase Database Connection Pooler
+      - key: CORS_ORIGIN
+        sync: false # Set in Render Dashboard: e.g. https://lifelink-web.vercel.app
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: SUPER_ADMIN_TOTP_SECRET
+        sync: false # Set in Render Dashboard (minimum 16 alphanumeric chars)
+      - key: SUPABASE_URL
+        value: https://newrxpzszdgroyqfffaa.supabase.co
+      - key: SUPABASE_ANON_KEY
+        value: sb_publishable_YbvJcYIqDoz9Fd-yxbOoPw_-0sPlLrN
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false # Set in Render Dashboard: Supabase Secret Service Role Key
+

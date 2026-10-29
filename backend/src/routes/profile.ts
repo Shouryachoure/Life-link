@@ -78,7 +78,19 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
       return res.json(result);
     } else {
       // Patient profile update
-      const { bloodGroup, allergies, emergencyContactName, emergencyContactPhone, medicalNotes, name, phone } = req.body;
+      const {
+        bloodGroup,
+        allergies,
+        medicalConditions,
+        currentMedications,
+        organDonorStatus,
+        preferredHospital,
+        emergencyContactName,
+        emergencyContactPhone,
+        medicalNotes,
+        name,
+        phone,
+      } = req.body;
 
       const result = await prisma.$transaction(async (tx) => {
         const updatedUser = await tx.user.update({
@@ -92,16 +104,24 @@ router.put('/', authenticate, async (req: AuthRequest, res) => {
         const updatedProfile = await tx.patientProfile.upsert({
           where: { userId: req.user!.id },
           update: {
-            bloodGroup,
-            allergies,
-            emergencyContactName,
-            emergencyContactPhone,
-            medicalNotes,
+            bloodGroup: bloodGroup !== undefined ? bloodGroup : undefined,
+            allergies: allergies !== undefined ? allergies : undefined,
+            medicalConditions: medicalConditions !== undefined ? medicalConditions : undefined,
+            currentMedications: currentMedications !== undefined ? currentMedications : undefined,
+            organDonorStatus: organDonorStatus !== undefined ? organDonorStatus : undefined,
+            preferredHospital: preferredHospital !== undefined ? preferredHospital : undefined,
+            emergencyContactName: emergencyContactName !== undefined ? emergencyContactName : undefined,
+            emergencyContactPhone: emergencyContactPhone !== undefined ? emergencyContactPhone : undefined,
+            medicalNotes: medicalNotes !== undefined ? medicalNotes : undefined,
           },
           create: {
             userId: req.user!.id,
-            bloodGroup: bloodGroup || 'O+',
+            bloodGroup: bloodGroup || 'UNKNOWN',
             allergies: allergies || '',
+            medicalConditions: medicalConditions || '',
+            currentMedications: currentMedications || '',
+            organDonorStatus: organDonorStatus || 'NOT_SPECIFIED',
+            preferredHospital: preferredHospital || '',
             emergencyContactName: emergencyContactName || 'Emergency Contact',
             emergencyContactPhone: emergencyContactPhone || phone || '',
             medicalNotes: medicalNotes || '',

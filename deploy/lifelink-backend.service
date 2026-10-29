@@ -1,0 +1,44 @@
+# ==============================================================================
+# LifeLink India — Systemd Service Unit Template
+# Location: /etc/systemd/system/lifelink-backend.service
+# ==============================================================================
+# Setup:
+#   sudo cp deploy/lifelink-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable lifelink-backend
+#   sudo systemctl start lifelink-backend
+#   sudo systemctl status lifelink-backend
+# ==============================================================================
+
+[Unit]
+Description=LifeLink Intelligent Emergency Care & Hospital OS Backend
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=lifelink
+Group=lifelink
+WorkingDirectory=/var/www/lifelink/backend
+EnvironmentFile=/var/www/lifelink/backend/.env
+ExecStart=/usr/bin/node dist/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifelink-backend
+
+# Security & Sandboxing Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource Limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

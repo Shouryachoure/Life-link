@@ -1,7 +1,8 @@
 import { Router } from 'express';
-import { RequestStatus } from '@prisma/client';
+import { RequestStatus, VerificationState } from '@prisma/client';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import prisma from '../db';
+import { getIO } from '../socket';
 
 const router = Router();
 
@@ -20,7 +21,14 @@ router.get('/active', authenticate, async (req: AuthRequest, res) => {
         where: {
           patientId: userId,
           status: {
-            notIn: [RequestStatus.COMPLETED, RequestStatus.REJECTED],
+            notIn: [
+              RequestStatus.COMPLETED,
+              RequestStatus.REJECTED,
+              RequestStatus.CANCELLED,
+              RequestStatus.EXPIRED,
+              RequestStatus.FAILED,
+              RequestStatus.NO_ELIGIBLE_AMBULANCE,
+            ],
           },
         },
         include: {
@@ -37,7 +45,14 @@ router.get('/active', authenticate, async (req: AuthRequest, res) => {
         where: {
           driverId: userId,
           status: {
-            notIn: [RequestStatus.COMPLETED, RequestStatus.REJECTED],
+            notIn: [
+              RequestStatus.COMPLETED,
+              RequestStatus.REJECTED,
+              RequestStatus.CANCELLED,
+              RequestStatus.EXPIRED,
+              RequestStatus.FAILED,
+              RequestStatus.NO_ELIGIBLE_AMBULANCE,
+            ],
           },
         },
         include: {
@@ -60,7 +75,14 @@ router.get('/active', authenticate, async (req: AuthRequest, res) => {
           where: {
             hospitalId: hospital.id,
             status: {
-              notIn: [RequestStatus.COMPLETED, RequestStatus.REJECTED],
+              notIn: [
+                RequestStatus.COMPLETED,
+                RequestStatus.REJECTED,
+                RequestStatus.CANCELLED,
+                RequestStatus.EXPIRED,
+                RequestStatus.FAILED,
+                RequestStatus.NO_ELIGIBLE_AMBULANCE,
+              ],
             },
           },
           include: {
@@ -110,7 +132,7 @@ router.post('/cancel', authenticate, async (req: AuthRequest, res) => {
       const req = await tx.emergencyRequest.update({
         where: { id: activeRequest.id },
         data: {
-          status: RequestStatus.REJECTED,
+          status: RequestStatus.CANCELLED,
         },
       });
 
@@ -123,6 +145,18 @@ router.post('/cancel', authenticate, async (req: AuthRequest, res) => {
 
       return req;
     });
+
+    const io = getIO();
+    if (io) {
+      io.to(`patient:${userId}`).emit('emergency:cancelled', { requestId: activeRequest.id });
+      if (activeRequest.driverId) {
+        io.to(`driver:${activeRequest.driverId}`).emit('emergency:cancelled', { requestId: activeRequest.id });
+      }
+      if (activeRequest.hospitalId) {
+        io.to(`hospital:${activeRequest.hospitalId}`).emit('emergency:cancelled', { requestId: activeRequest.id });
+      }
+      io.to('super_admin_room').emit('telemetry:update');
+    }
 
     res.json({ message: 'Emergency request cancelled successfully', request: updatedRequest });
   } catch (err: any) {
@@ -241,11 +275,22 @@ router.post('/symptom-triage', authenticate, async (req: AuthRequest, res) => {
       analysis = 'Symptoms indicate musculoskeletal trauma. BASIC LIFE SUPPORT vehicle with splints is recommended.';
     }
 
-    // Retrieve hospitals from DB
-    const allHospitals = await prisma.hospital.findMany();
+    // Retrieve verified hospitals with doctors from DB
+    const allHospitals = await prisma.hospital.findMany({
+      where: {
+        verificationState: { notIn: [VerificationState.SUSPENDED, VerificationState.REJECTED] },
+      },
+      include: {
+        doctors: {
+          where: { isActive: true },
+          select: { specialization: true },
+        },
+      },
+    });
 
-    // Map each hospital to include distance & mocked specialties list
+    // Map each hospital to include distance & verified specialties list
     const scoredHospitals = allHospitals
+      .filter((h) => h.lat != null && h.lng != null && !isNaN(h.lat) && !isNaN(h.lng))
       .map((h) => {
         // Haversine distance calculator
         const R = 6371; // Earth radius in km
@@ -258,17 +303,13 @@ router.post('/symptom-triage', authenticate, async (req: AuthRequest, res) => {
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distanceKm = R * c;
 
-        // Mock specialties mapping based on name
-        let specialties = ['General Medicine'];
-        if (h.name.includes('General')) {
-          specialties = ['Cardiology', 'Neurology', 'Trauma', 'General Medicine'];
-        } else if (h.name.includes('UCSF')) {
-          specialties = ['Orthopedics', 'Pediatrics', 'Neurology', 'General Medicine'];
-        } else if (h.name.includes('CPMC')) {
-          specialties = ['Cardiology', 'Geriatrics', 'General Medicine'];
-        }
+        // Verified doctor specializations from DB
+        const docSpecialties = Array.from(new Set(h.doctors.map((d: any) => d.specialization)));
+        const specialties: string[] = docSpecialties.length > 0
+          ? docSpecialties
+          : ['General Medicine', 'Emergency & Trauma'];
 
-        const supportsSpecialty = specialties.includes(specialty);
+        const supportsSpecialty = specialties.some((s: string) => s.toLowerCase().includes(specialty.toLowerCase()));
 
         return {
           id: h.id,
