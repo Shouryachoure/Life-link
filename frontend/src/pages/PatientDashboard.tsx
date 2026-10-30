@@ -2158,7 +2158,7 @@ export const PatientDashboard: React.FC = () => {
                 className="w-full py-4 bg-red-600 hover:bg-red-500 text-white font-black text-base md:text-lg rounded-2xl flex items-center justify-center gap-3 shadow-xl shadow-red-600/40 transition-all cursor-pointer animate-pulse"
               >
                 <Phone className="w-6 h-6" />
-                <span>Call 112 (National Emergency Helpline)</span>
+                <span>Call 112</span>
               </a>
 
               <div className="grid grid-cols-2 gap-2 text-xs">

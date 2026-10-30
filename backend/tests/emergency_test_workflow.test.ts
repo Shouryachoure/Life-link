@@ -130,9 +130,10 @@ async function runSosTestWorkflowVerification() {
       // Verify notification payload content
       assert.strictEqual(data.notificationPayload.recipient.phone, '+918669202393');
       assert.strictEqual(data.notificationPayload.recipient.name, 'TEST CONTACT');
-      assert.ok(data.notificationPayload.messageBody.includes('[TEST MODE - LIFE-LINK DRILL]'));
+      assert.ok(data.notificationPayload.messageBody.includes('LIFELINK SOS TEST'));
       assert.ok(data.notificationPayload.messageBody.includes(data.testEmergencyId));
-      assert.ok(data.notificationPayload.messageBody.includes('https://maps.google.com/?q=21.1458,79.0882'));
+      assert.ok(data.notificationPayload.messageBody.includes('https://www.google.com/maps?q=21.1458,79.0882'));
+      assert.ok(data.notificationPayload.messageBody.includes('TEST ONLY'));
 
       createdRequestId = data.requestId;
       testEmergencyId = data.testEmergencyId;
@@ -262,7 +263,7 @@ async function runSosTestWorkflowVerification() {
 
       // Field 3: Notification Prepared
       assert.strictEqual(report.notification.recipient.phone, '+918669202393');
-      assert.strictEqual(report.notification.testModeDesignation, '[TEST MODE — LIFE-LINK CONTROLLED DRILL]');
+      assert.strictEqual(report.notification.testModeDesignation, 'TEST ONLY');
 
       // Field 4: Carrier Delivery Status (truthful failure reported)
       assert.strictEqual(report.delivery.attempted, true);
@@ -275,7 +276,12 @@ async function runSosTestWorkflowVerification() {
       assert.strictEqual(report.calling.status, 'DIALER_LAUNCHED');
       assert.strictEqual(report.calling.recipient, '+918669202393');
 
-      // Field 6: Audit Timeline & Safety Safeguards
+      // Field 6: Ambulance Dispatch NOT ATTEMPTED
+      assert.strictEqual(report.ambulanceDispatch.status, 'NOT ATTEMPTED — TEST MODE');
+      assert.strictEqual(report.ambulanceDispatch.realAmbulanceDispatched, false);
+      assert.strictEqual(report.ambulanceDispatch.fakeVehiclePositionsCreated, false);
+
+      // Audit Timeline & Safety Safeguards
       assert.ok(report.timeline.length >= 3, 'Timeline must contain initiate, delivery, and call events');
       assert.strictEqual(report.safetyStatus.zeroRealAmbulancesDispatched, true);
       assert.strictEqual(report.safetyStatus.zeroHospitalErNotified, true);

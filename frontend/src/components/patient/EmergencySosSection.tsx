@@ -106,6 +106,11 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
   const [testAuditResults, setTestAuditResults] = useState<any | null>(null);
   const [testAuditLoading, setTestAuditLoading] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [isTestModeActive, setIsTestModeActive] = useState(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
+  const [gpsTimestamp, setGpsTimestamp] = useState<string | null>(null);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
 
   // Ambulance Dispatch Configuration
   const [ambulanceTier, setAmbulanceTier] = useState<'BASIC_LIFE_SUPPORT' | 'ADVANCED_LIFE_SUPPORT' | 'OXYGEN_SUPPORT'>(
@@ -423,6 +428,66 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
     };
   }, [sosSubTab, testConfig, apiFetch]);
 
+  useEffect(() => {
+    if (sosSubTab === 'TEST_WORKFLOW') {
+      setIsTestModeActive(true);
+    }
+  }, [sosSubTab]);
+
+  const captureTestGpsLocation = () => {
+    if (!navigator.geolocation) {
+      setGpsError('Geolocation is not supported by your browser or device.');
+      return;
+    }
+    setGpsError(null);
+    onDetectLocation();
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const uLat = pos.coords.latitude;
+        const uLng = pos.coords.longitude;
+        const acc = Math.round(pos.coords.accuracy);
+        const timeIso = new Date(pos.timestamp || Date.now()).toISOString();
+        setGpsAccuracy(acc);
+        setGpsTimestamp(timeIso);
+        onSetCoords(uLat, uLng);
+      },
+      (err) => {
+        let errMessage = 'Failed to acquire GPS location.';
+        if (err.code === err.PERMISSION_DENIED) {
+          errMessage = 'GPS permission denied. Please enable location permission in your browser or phone settings to acquire coordinates.';
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          errMessage = 'GPS signal unavailable. Satellite or cellular fix could not be obtained at this time.';
+        } else if (err.code === err.TIMEOUT) {
+          errMessage = 'GPS location request timed out. Please retry with a clearer sky view or Wi-Fi connection.';
+        }
+        setGpsError(errMessage);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
+
+  const handleShareNotification = async () => {
+    if (!testNotificationPayload?.messageBody) return;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'LIFELINK SOS TEST',
+          text: testNotificationPayload.messageBody,
+        });
+        setShareFeedback('Shared successfully via device!');
+        setTimeout(() => setShareFeedback(null), 2500);
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('Share failed:', err.message);
+        }
+      }
+    } else {
+      navigator.clipboard?.writeText(testNotificationPayload.messageBody);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    }
+  };
+
   const handleInitiateTestSos = async () => {
     setTestLoading(true);
     setTestError(null);
@@ -432,6 +497,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
         pickupLat: lat,
         pickupLng: lng,
         gpsPermission: geoPermission,
+        gpsAccuracy: gpsAccuracy,
         pickupAddress: addressQuery || 'Nagpur Pilot Zone, Maharashtra',
         notes: 'Controlled emergency workflow test drill',
       };
@@ -558,9 +624,57 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
           className="w-full md:w-auto px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-md shadow-rose-600/20 active:scale-[0.99] transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer"
         >
           <Phone className="w-3.5 h-3.5" />
-          <span>Call 112 Hotline</span>
+          <span>Call 112</span>
         </a>
       </div>
+
+      {/* PROMINENT TEST MODE ACTIVE INDICATOR */}
+      {(isTestModeActive || sosSubTab === 'TEST_WORKFLOW') && (
+        <div className="p-4 sm:p-5 rounded-2xl bg-amber-500/15 border-2 border-amber-500/60 text-amber-900 dark:text-amber-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg shadow-amber-500/10">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white font-mono font-black text-sm flex items-center justify-center shrink-0 shadow-md shadow-amber-500/30">
+              <FlaskConical className="w-5 h-5 text-white animate-pulse" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-black uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                  ⚠️ TEST MODE ACTIVE
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-900 dark:text-amber-200 border border-amber-500/40 font-mono">
+                  Authorized Recipient: {EMERGENCY_TEST_PHONE}
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-900 text-white font-mono">
+                  SANDBOX ISOLATED
+                </span>
+              </div>
+              <p className="text-xs text-amber-800/90 dark:text-amber-300/90 mt-1 leading-relaxed">
+                LifeLink is currently operating in controlled test mode. Real ambulance operators and hospital emergency rooms will <strong>NEVER</strong> be notified.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+            <button
+              type="button"
+              onClick={() => setSosSubTab('TEST_WORKFLOW')}
+              className="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <FlaskConical className="w-3.5 h-3.5" />
+              <span>Test Console</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsTestModeActive(false);
+                if (sosSubTab === 'TEST_WORKFLOW') setSosSubTab('SOS');
+              }}
+              className="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl border border-amber-400 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-900 dark:text-amber-200 font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer text-center"
+            >
+              Exit Test Mode
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 2. EMERGENCY ASSISTANCE HEADER & REAL-TIME LOCATION BAR */}
       <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5">
@@ -668,61 +782,84 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
           </div>
         )}
 
-        {/* Sub-navigation tabs: SOS Action vs AI Symptom Assistance vs Live Radar Map */}
-        <div className="flex items-center gap-2 pt-4 overflow-x-auto">
-          <button
-            type="button"
-            onClick={() => setSosSubTab('SOS')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-              sosSubTab === 'SOS'
-                ? 'bg-rose-600 text-white shadow-sm shadow-rose-600/30'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <ShieldAlert className="w-3.5 h-3.5" />
-            <span>Emergency SOS Dispatch</span>
-          </button>
+        {/* Sub-navigation tabs & Test Mode toggle */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4">
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+            <button
+              type="button"
+              onClick={() => setSosSubTab('SOS')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                sosSubTab === 'SOS'
+                  ? 'bg-rose-600 text-white shadow-sm shadow-rose-600/30'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span>Emergency SOS Dispatch</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setSosSubTab('AI_TRIAGE')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-              sosSubTab === 'AI_TRIAGE'
-                ? 'bg-teal-600 text-white shadow-sm shadow-teal-600/30'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>AI Symptom Router</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setSosSubTab('AI_TRIAGE')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                sosSubTab === 'AI_TRIAGE'
+                  ? 'bg-teal-600 text-white shadow-sm shadow-teal-600/30'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>AI Symptom Router</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setSosSubTab('RADAR')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-              sosSubTab === 'RADAR'
-                ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <Radio className="w-3.5 h-3.5" />
-            <span>Live Hospital & Ambulance Map</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => setSosSubTab('RADAR')}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                sosSubTab === 'RADAR'
+                  ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Radio className="w-3.5 h-3.5" />
+              <span>Live Hospital & Ambulance Map</span>
+            </button>
 
+            <button
+              type="button"
+              onClick={() => {
+                setSosSubTab('TEST_WORKFLOW');
+                setIsTestModeActive(true);
+              }}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                sosSubTab === 'TEST_WORKFLOW'
+                  ? 'bg-amber-600 text-white shadow-sm shadow-amber-600/30 ring-2 ring-amber-500/50'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <FlaskConical className="w-3.5 h-3.5 text-amber-300" />
+              <span>Controlled SOS Drill</span>
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                Test (+918669202393)
+              </span>
+            </button>
+          </div>
+
+          {/* Explicit Test Mode Toggle Switch Button */}
           <button
             type="button"
-            onClick={() => setSosSubTab('TEST_WORKFLOW')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-              sosSubTab === 'TEST_WORKFLOW'
-                ? 'bg-amber-600 text-white shadow-sm shadow-amber-600/30 ring-2 ring-amber-500/50'
-                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+            onClick={() => {
+              const next = !isTestModeActive;
+              setIsTestModeActive(next);
+            }}
+            className={`px-3 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 shrink-0 select-none border ${
+              isTestModeActive
+                ? 'bg-amber-500/20 text-amber-900 dark:text-amber-200 border-amber-500 ring-2 ring-amber-500/30'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700'
             }`}
+            title="Toggle between Live Dispatch and Controlled Test Mode"
           >
-            <FlaskConical className="w-3.5 h-3.5 text-amber-300" />
-            <span>Controlled SOS Drill</span>
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-              Test (+918669202393)
-            </span>
+            <FlaskConical className={`w-3.5 h-3.5 ${isTestModeActive ? 'text-amber-600 animate-pulse' : 'text-slate-400'}`} />
+            <span>🧪 Test Mode: <strong className={isTestModeActive ? 'text-amber-700 dark:text-amber-300' : 'text-slate-500'}>{isTestModeActive ? 'ON' : 'OFF'}</strong></span>
           </button>
         </div>
       </div>
@@ -886,38 +1023,80 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               {/* STATE 1: IDLE */}
               {dispatchPhase === 'IDLE' && (
                 <div className="text-center py-4 space-y-6">
-                  <div>
-                    <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
-                      Tap to Initiate Code Red Dispatch
-                    </h2>
-                    <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
-                      Transmits high-priority emergency alert with your GPS coordinates and medical record to the nearest ambulance and hospital ER trauma team.
-                    </p>
-                  </div>
-
-                  {/* Refined, proportionate SOS Button */}
-                  <div className="flex justify-center py-2">
-                    <button
-                      type="button"
-                      onClick={startSosCountdown}
-                      className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-rose-700 via-rose-600 to-red-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-rose-600/35 hover:shadow-rose-600/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
-                      aria-label="Activate Emergency SOS"
-                    >
-                      {/* Subtle pulse ring */}
-                      <span className="absolute inset-0 rounded-full bg-rose-500/20 animate-ping pointer-events-none"></span>
-
-                      <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
-                        <ShieldAlert className="w-8 h-8 text-white" />
+                  {isTestModeActive ? (
+                    <div>
+                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-extrabold mb-2">
+                        <FlaskConical className="w-3.5 h-3.5 animate-pulse text-amber-600" />
+                        <span>CONTROLLED TEST MODE (DRILL)</span>
                       </div>
-                      <span className="text-3xl font-black tracking-widest uppercase font-mono">SOS</span>
-                      <span className="text-[10px] uppercase font-bold tracking-wider text-rose-100 mt-1">
-                        Tap for Help
-                      </span>
-                    </button>
+                      <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
+                        Tap to Run Safe Test SOS Drill
+                      </h2>
+                      <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
+                        Authorized test recipient: <strong className="text-slate-800 dark:text-slate-200">{EMERGENCY_TEST_PHONE}</strong>. Captures GPS, generates a persistent test record in Supabase, and prepares notification with zero ambulance dispatches.
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
+                        Tap to Initiate Code Red Dispatch
+                      </h2>
+                      <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
+                        Transmits high-priority emergency alert with your GPS coordinates and medical record to the nearest ambulance and hospital ER trauma team.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Refined SOS Button - Switches styling and handler based on Test Mode */}
+                  <div className="flex justify-center py-2">
+                    {isTestModeActive ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await handleInitiateTestSos();
+                          setSosSubTab('TEST_WORKFLOW');
+                        }}
+                        disabled={testLoading}
+                        className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-amber-600 via-amber-500 to-yellow-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-amber-500/35 hover:shadow-amber-500/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
+                        aria-label="Activate Controlled Test SOS Drill"
+                      >
+                        <span className="absolute inset-0 rounded-full bg-amber-500/20 animate-ping pointer-events-none"></span>
+
+                        <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
+                          <FlaskConical className="w-8 h-8 text-white" />
+                        </div>
+                        <span className="text-xl sm:text-2xl font-black tracking-wider uppercase font-mono text-center">
+                          TEST SOS (DRILL)
+                        </span>
+                        <span className="text-[9px] uppercase font-black tracking-wider text-amber-950 mt-1 bg-white/80 px-2 py-0.5 rounded-full shadow-xs">
+                          Safe Test Mode • 0 Paramedics Notified
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={startSosCountdown}
+                        className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-rose-700 via-rose-600 to-red-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-rose-600/35 hover:shadow-rose-600/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
+                        aria-label="Activate Emergency SOS"
+                      >
+                        {/* Subtle pulse ring */}
+                        <span className="absolute inset-0 rounded-full bg-rose-500/20 animate-ping pointer-events-none"></span>
+
+                        <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
+                          <ShieldAlert className="w-8 h-8 text-white" />
+                        </div>
+                        <span className="text-3xl font-black tracking-widest uppercase font-mono">SOS</span>
+                        <span className="text-[10px] uppercase font-bold tracking-wider text-rose-100 mt-1">
+                          Tap for Help
+                        </span>
+                      </button>
+                    )}
                   </div>
 
                   <p className="text-[11px] text-slate-400 dark:text-slate-500">
-                    Includes a 10-second cancellable safety window before live broadcast.
+                    {isTestModeActive
+                      ? 'Safe Sandbox Drill: Will create isolated record & open verification dashboard.'
+                      : 'Includes a 10-second cancellable safety window before live broadcast.'}
                   </p>
                 </div>
               )}
@@ -1369,7 +1548,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                     1
                   </span>
                   <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-                    GPS Coordinates & Permission
+                    GPS Coordinates & Accuracy
                   </h3>
                 </div>
                 <span className={`px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase ${
@@ -1384,8 +1563,18 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               </div>
 
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Captures high-accuracy device coordinates via browser Geolocation API with explicit patient consent.
+                Captures high-accuracy device coordinates via browser Geolocation API with explicit accuracy radius.
               </p>
+
+              {gpsError && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block font-bold">GPS Acquisition Notice:</strong>
+                    <p className="mt-0.5 leading-relaxed">{gpsError}</p>
+                  </div>
+                </div>
+              )}
 
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 space-y-2">
                 <div className="flex items-center justify-between text-xs">
@@ -1395,6 +1584,18 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400 font-semibold">Captured Longitude:</span>
                   <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{lng ? lng.toFixed(5) : '—'}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-semibold">Accuracy:</span>
+                  <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                    {gpsAccuracy !== null ? `±${gpsAccuracy} m` : 'Standard browser accuracy'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-semibold">Capture Timestamp:</span>
+                  <span className="font-mono text-slate-700 dark:text-slate-300 text-3xs">
+                    {gpsTimestamp ? new Date(gpsTimestamp).toLocaleTimeString() + ' IST' : 'Live browser acquisition'}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400 font-semibold">Detected Zone:</span>
@@ -1407,7 +1608,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={onDetectLocation}
+                  onClick={captureTestGpsLocation}
                   disabled={locLoading}
                   className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
                 >
@@ -1416,7 +1617,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 </button>
 
                 <a
-                  href={`https://maps.google.com/?q=${lat},${lng}`}
+                  href={`https://www.google.com/maps?q=${lat},${lng}`}
                   target="_blank"
                   rel="noreferrer"
                   className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold transition-colors flex items-center gap-1.5 ml-auto"
@@ -1541,7 +1742,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 }`}
               >
                 <PhoneCall className="w-4 h-4" />
-                <span>Call {EMERGENCY_TEST_NAME} ({EMERGENCY_TEST_PHONE})</span>
+                <span>Call Test Number ({EMERGENCY_TEST_PHONE})</span>
               </a>
 
               {testCallResult && (
@@ -1552,7 +1753,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               )}
             </div>
 
-            {/* STEP 4: SEND TEST LOCATION ACTION */}
+            {/* STEP 4: SEND TEST LOCATION NOTIFICATION */}
             <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -1569,7 +1770,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                       ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
                       : 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
                   }`}>
-                    {testDeliveryResult.success ? 'Carrier Delivered' : 'Carrier Unavailable'}
+                    {testDeliveryResult.success ? 'Carrier Delivered' : 'Integration Required'}
                   </span>
                 ) : (
                   <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-slate-100 dark:bg-slate-800 text-slate-500">
@@ -1591,12 +1792,12 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400 font-semibold">Google Maps URL:</span>
                   <a
-                    href={`https://maps.google.com/?q=${lat},${lng}`}
+                    href={`https://www.google.com/maps?q=${lat},${lng}`}
                     target="_blank"
                     rel="noreferrer"
                     className="font-mono text-teal-600 dark:text-teal-400 hover:underline truncate max-w-[200px]"
                   >
-                    https://maps.google.com/?q={lat.toFixed(4)},{lng.toFixed(4)}
+                    https://www.google.com/maps?q={lat.toFixed(4)},{lng.toFixed(4)}
                   </a>
                 </div>
               </div>
@@ -1638,6 +1839,35 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 )}
               </button>
 
+              {/* Share and Copy Actions if notification payload is ready */}
+              {testNotificationPayload && (
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleShareNotification}
+                    className="flex-1 py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 text-teal-600" />
+                    <span>Share via Device</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(testNotificationPayload.messageBody);
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2000);
+                    }}
+                    className="flex-1 py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedLink ? 'Copied' : 'Copy Message'}</span>
+                  </button>
+                </div>
+              )}
+              {shareFeedback && (
+                <p className="text-2xs text-emerald-600 dark:text-emerald-400 font-semibold text-center">{shareFeedback}</p>
+              )}
+
               {/* Carrier Delivery Feedback & Mobile Deep Links */}
               {testDeliveryResult && (
                 <div className="space-y-3 pt-2">
@@ -1645,10 +1875,10 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                     <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200 space-y-2">
                       <div className="font-bold flex items-center gap-1.5">
                         <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                        <span>Automated Carrier Delivery Unavailable</span>
+                        <span>Automatic Carrier Delivery Requires Integration</span>
                       </div>
                       <p className="text-2xs text-amber-800/80 dark:text-amber-300/80 leading-relaxed">
-                        No live Twilio credentials configured in backend. Per safety specifications, successful delivery is <strong className="underline">never simulated</strong>. You can dispatch directly using your phone&apos;s native SIM card or WhatsApp below:
+                        Automatic SMS delivery requires live Twilio credentials. Delivery is <strong className="underline">not simulated</strong>. You can dispatch manually using device messaging below:
                       </p>
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -1748,86 +1978,86 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
 
               {/* 6 Core Verification Parameters */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* 1. SOS Request Created */}
+                {/* 1. SOS test record created */}
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">1. SOS Record Created</span>
+                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">1. SOS Test Record Created</span>
                   <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Record Active (DB ID: {testRequestId?.substring(0, 8)}...)</span>
+                    <span>Record Active ({testEmergencyId})</span>
                   </div>
                   <span className="text-3xs text-slate-500 dark:text-slate-400 font-mono block">
-                    Mode: isDemo=true (Isolated)
+                    Mode: isDemo=true (Isolated Sandbox)
                   </span>
                 </div>
 
-                {/* 2. GPS Permission & Coordinates */}
+                {/* 2. GPS captured */}
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">2. GPS Coordinates</span>
+                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">2. GPS Captured</span>
                   <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
                     <MapPin className="w-3.5 h-3.5 text-rose-500" />
                     <span>{lat.toFixed(5)}, {lng.toFixed(5)}</span>
                   </div>
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    Permission: {geoPermission}
+                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate font-mono">
+                    Accuracy: {gpsAccuracy !== null ? `±${gpsAccuracy} m` : 'Standard'} • {geoPermission}
                   </span>
                 </div>
 
-                {/* 3. Emergency Notification Prepared */}
+                {/* 3. Notification prepared */}
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
                   <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">3. Notification Prepared</span>
                   <div className="flex items-center gap-1.5 text-xs font-bold text-teal-600 dark:text-teal-400">
                     <Check className="w-3.5 h-3.5" />
-                    <span>Google Maps Link Embedded</span>
+                    <span>Payload Ready ({testRequestId})</span>
                   </div>
                   <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    Designation: [TEST MODE]
+                    Maps URL: https://www.google.com/maps?q=...
                   </span>
                 </div>
 
-                {/* 4. Notification Delivery Status */}
+                {/* 4. Notification actually delivered, if provider integration exists */}
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">4. Delivery Status</span>
+                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">4. Notification Actually Delivered</span>
                   {testDeliveryResult ? (
                     <div className="flex items-center gap-1.5 text-xs font-bold">
                       {testDeliveryResult.success ? (
                         <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Live Carrier Delivered
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Delivered via Live Carrier
                         </span>
                       ) : (
                         <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
-                          <AlertTriangle className="w-3.5 h-3.5" /> Carrier Unavailable (No Fake Mock)
+                          <AlertTriangle className="w-3.5 h-3.5" /> Integration Required (Not Simulated)
                         </span>
                       )}
                     </div>
                   ) : (
-                    <span className="text-xs text-slate-400 font-semibold">Not Sent Yet</span>
+                    <span className="text-xs text-slate-400 font-semibold">Awaiting Send Trigger</span>
                   )}
                   <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    SIM/WhatsApp fallback links active
+                    Provider: {testConfig?.carrier?.isConfigured ? 'Twilio Active' : 'Unconfigured • Fallbacks Ready'}
                   </span>
                 </div>
 
-                {/* 5. Call Action Initiated */}
+                {/* 5. Call action initiated */}
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
                   <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">5. Call Action Initiated</span>
                   <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
                     <PhoneForwarded className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{testCallResult ? 'DIALER_LAUNCHED' : 'Awaiting Click'}</span>
+                    <span>{testCallResult ? 'DIALER_LAUNCHED' : 'Ready for User Tap'}</span>
                   </div>
                   <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    {testCallResult ? 'Trigger recorded in audit event' : `Target: ${EMERGENCY_TEST_PHONE}`}
+                    {testCallResult ? 'Dialer trigger logged in database' : `Target: ${EMERGENCY_TEST_PHONE}`}
                   </span>
                 </div>
 
-                {/* 6. Safety Safeguards */}
+                {/* 6. Ambulance dispatch: NOT ATTEMPTED — TEST MODE */}
                 <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-800/60 space-y-1">
-                  <span className="text-3xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">6. Safety Isolation</span>
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                  <span className="text-3xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">6. Ambulance Dispatch</span>
+                  <div className="flex items-center gap-1.5 text-xs font-black text-emerald-700 dark:text-emerald-300">
                     <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>Zero Real Ambulances Dispatched</span>
+                    <span>NOT ATTEMPTED — TEST MODE</span>
                   </div>
                   <span className="text-3xs text-emerald-600/80 dark:text-emerald-400/80 block">
-                    Permanent 112 hotline intact
+                    Zero real vehicles dispatched • Zero fake positions
                   </span>
                 </div>
               </div>

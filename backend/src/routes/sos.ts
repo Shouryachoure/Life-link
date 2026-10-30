@@ -323,6 +323,7 @@ router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, re
     pickupLat,
     pickupLng,
     gpsPermission = 'GRANTED',
+    gpsAccuracy,
     pickupAddress,
     notes,
   } = req.body;
@@ -354,12 +355,14 @@ router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, re
 
     const shortId = emergencyRequest.id.substring(0, 8).toUpperCase();
     const testEmergencyId = `LL-TEST-${shortId}`;
-    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+    const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
     const requestTimestamp = new Date().toISOString();
     const formattedIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const accuracyNumber = typeof gpsAccuracy === 'number' && !isNaN(gpsAccuracy) ? Math.round(gpsAccuracy) : null;
+    const accuracySuffix = accuracyNumber !== null ? ` (Accuracy: ±${accuracyNumber}m)` : '';
 
-    // Standardized emergency notification payload
-    const notificationMessage = `[TEST MODE - LIFE-LINK DRILL] Controlled SOS Test Alert\nEmergency ID: ${testEmergencyId}\nPatient: ${req.user.name || 'Test User'}\nLocation: ${mapsUrl} (${lat.toFixed(5)}, ${lng.toFixed(5)})\nTime: ${formattedIST} IST\nTest Contact: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nNote: This is a controlled safety drill. No real dispatch triggered.`;
+    // Standardized emergency notification payload strictly complying with test format
+    const notificationMessage = `[TEST ONLY] LIFELINK SOS TEST\nTest Request ID: ${testEmergencyId}\nCoordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}${accuracySuffix}\nGoogle Maps: ${mapsUrl}\nTimestamp: ${formattedIST} IST\nPatient: ${req.user.name || 'Test Patient'} (ID: ${req.user.id})\nAuthorized Recipient: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nAmbulance Dispatch: NOT ATTEMPTED — TEST MODE\nNote: Controlled emergency test. No real dispatch triggered.`;
 
     // Persist audit event
     await prisma.emergencyEvent.create({
@@ -374,9 +377,14 @@ router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, re
           testEmergencyId,
           gpsPermission,
           coordinates: { lat, lng },
+          accuracy: accuracyNumber,
           mapsUrl,
           requestTimestamp,
+          patientId: req.user.id,
+          patientName: req.user.name || 'Test Patient',
           recipient: { name: EMERGENCY_TEST_CONTACT_NAME, phone: EMERGENCY_TEST_CONTACT_PHONE },
+          ambulanceDispatch: 'NOT ATTEMPTED — TEST MODE',
+          notificationPrepared: notificationMessage,
           userNotes: notes || null,
         }),
       },
@@ -385,17 +393,19 @@ router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, re
     const carrier = getCarrierProviderStatus();
 
     // Safe sanitized console log (no raw coordinates exposed)
-    console.log(`[LifeLink Test Workflow] SOS Test Initiated: ${testEmergencyId} for User ${req.user.id} (GPS Permission: ${gpsPermission})`);
+    console.log(`[LifeLink Test Workflow] SOS Test Initiated: ${testEmergencyId} for User ${req.user.id} (GPS Permission: ${gpsPermission}, Accuracy: ±${accuracyNumber ?? 'N/A'}m)`);
 
     return res.status(201).json({
       success: true,
       requestId: emergencyRequest.id,
       testEmergencyId,
       status: 'INITIATED',
+      patientId: req.user.id,
       gps: {
         permission: gpsPermission,
         lat,
         lng,
+        accuracy: accuracyNumber,
         mapsUrl,
         capturedAt: requestTimestamp,
       },
@@ -407,15 +417,17 @@ router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, re
         },
         mapsUrl,
         coordinates: { lat, lng },
+        accuracy: accuracyNumber,
         messageBody: notificationMessage,
         preparedAt: requestTimestamp,
         formattedIST,
-        testModeDesignation: '[TEST MODE — LIFE-LINK CONTROLLED DRILL]',
+        testModeDesignation: 'TEST ONLY',
       },
       carrier: {
         isConfigured: carrier.isConfigured,
         provider: carrier.provider,
       },
+      dispatchStatus: 'NOT ATTEMPTED — TEST MODE',
       timestamp: requestTimestamp,
       officialEmergencyFallback: OFFICIAL_112_NOTICE,
     });
@@ -465,10 +477,22 @@ router.post('/test-workflow/send-location', authenticate, async (req: AuthReques
     const testEmergencyId = `LL-TEST-${shortId}`;
     const lat = emergencyRequest.pickupLat;
     const lng = emergencyRequest.pickupLng;
-    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+    const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
     const formattedIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-    const messageBody = `[TEST MODE - LIFE-LINK DRILL] Controlled SOS Test Alert\nID: ${testEmergencyId}\nPatient: ${req.user.name || 'Test User'}\nLocation: ${mapsUrl}\nTime: ${formattedIST} IST\nRecipient: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nNote: Controlled safety drill. No real emergency.`;
+    // Retrieve accuracy from initiate event if logged
+    const initEvent = await prisma.emergencyEvent.findFirst({
+      where: { requestId: emergencyRequest.id, eventType: 'TEST_SOS_INITIATED' },
+    });
+    let accuracyText = '';
+    if (initEvent?.metadata) {
+      try {
+        const meta = JSON.parse(initEvent.metadata);
+        if (meta.accuracy) accuracyText = ` (Accuracy: ±${Math.round(meta.accuracy)}m)`;
+      } catch {}
+    }
+
+    const messageBody = `[TEST ONLY] LIFELINK SOS TEST\nTest Request ID: ${testEmergencyId}\nCoordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}${accuracyText}\nGoogle Maps: ${mapsUrl}\nTimestamp: ${formattedIST} IST\nPatient: ${req.user.name || 'Test Patient'} (ID: ${req.user.id})\nAuthorized Recipient: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nAmbulance Dispatch: NOT ATTEMPTED — TEST MODE\nNote: Controlled emergency test. No real dispatch triggered.`;
 
     // Attempt live carrier delivery (requireRealProvider = true to forbid simulated mock success)
     const smsResult = await sendSMS(EMERGENCY_TEST_CONTACT_PHONE, messageBody, {
@@ -635,7 +659,7 @@ router.get('/test-workflow/results/:requestId', authenticate, async (req: AuthRe
     const testEmergencyId = `LL-TEST-${shortId}`;
     const lat = emergencyRequest.pickupLat;
     const lng = emergencyRequest.pickupLng;
-    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+    const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
 
     const initiateEvent = emergencyRequest.events.find((e) => e.eventType === 'TEST_SOS_INITIATED');
     const deliveryEvent = emergencyRequest.events.find((e) => e.eventType === 'TEST_LOCATION_DELIVERY_ATTEMPTED');
@@ -664,9 +688,69 @@ router.get('/test-workflow/results/:requestId', authenticate, async (req: AuthRe
       createdAt: emergencyRequest.createdAt,
       status: emergencyRequest.status,
       isDemo: true,
+      patientId: emergencyRequest.patientId,
+      // 6 Core Statuses
+      sosRecordCreated: {
+        status: 'CREATED',
+        requestId: emergencyRequest.id,
+        testEmergencyId,
+        isDemo: true,
+        patientId: emergencyRequest.patientId,
+        createdAt: emergencyRequest.createdAt,
+      },
+      gpsCaptured: {
+        status: 'CAPTURED',
+        lat,
+        lng,
+        accuracy: initMeta.accuracy ?? null,
+        permission: initMeta.gpsPermission || 'GRANTED',
+        mapsUrl,
+        timestamp: initMeta.requestTimestamp || emergencyRequest.createdAt,
+      },
+      notificationPrepared: {
+        status: 'PREPARED',
+        recipient: {
+          name: EMERGENCY_TEST_CONTACT_NAME,
+          phone: EMERGENCY_TEST_CONTACT_PHONE,
+        },
+        mapsUrl,
+        messageBody: initMeta.notificationPrepared || `[TEST ONLY] LIFELINK SOS TEST\nTest Request ID: ${testEmergencyId}\nCoordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}\nGoogle Maps: ${mapsUrl}`,
+        testModeDesignation: 'TEST ONLY',
+        preparedAt: initMeta.requestTimestamp || emergencyRequest.createdAt,
+      },
+      notificationDelivered: {
+        status: deliveryEvent
+          ? (deliveryMeta.success ? 'DELIVERED' : 'FAILED')
+          : 'NOT_ATTEMPTED',
+        attempted: Boolean(deliveryEvent),
+        success: deliveryMeta.success ?? false,
+        deliveryStatus: deliveryMeta.deliveryStatus || 'NOT_ATTEMPTED',
+        deliveryMode: deliveryMeta.deliveryMode || 'NONE',
+        carrierConfigured: carrier.isConfigured,
+        carrierProvider: carrier.provider,
+        error: deliveryMeta.error || (!carrier.isConfigured ? 'Automatic delivery requires an integration. No live SMS carrier configured.' : null),
+        timestamp: deliveryMeta.timestamp || null,
+      },
+      callActionInitiated: {
+        status: callEvent ? 'DIALER_LAUNCHED' : 'NOT_INITIATED',
+        dialerLaunched: Boolean(callEvent),
+        statusLabel: callMeta.status || (callEvent ? 'DIALER_LAUNCHED' : 'NOT_INITIATED'),
+        dialerUri: `tel:${EMERGENCY_TEST_CONTACT_PHONE}`,
+        recipient: EMERGENCY_TEST_CONTACT_PHONE,
+        timestamp: callMeta.timestamp || null,
+        disclaimer: 'Device dialer triggered. Call completion requires physical placement by user on device.',
+      },
+      ambulanceDispatch: {
+        status: 'NOT ATTEMPTED — TEST MODE',
+        realAmbulanceDispatched: false,
+        fakeVehiclePositionsCreated: false,
+        note: 'Controlled test mode active. Real fleet dispatch strictly disabled.',
+      },
+      // Backwards compatible fields
       gps: {
         lat,
         lng,
+        accuracy: initMeta.accuracy ?? null,
         mapsUrl,
         permission: initMeta.gpsPermission || 'GRANTED',
         capturedAt: initMeta.requestTimestamp || emergencyRequest.createdAt,
@@ -678,7 +762,7 @@ router.get('/test-workflow/results/:requestId', authenticate, async (req: AuthRe
         },
         mapsUrl,
         preparedAt: initMeta.requestTimestamp || emergencyRequest.createdAt,
-        testModeDesignation: '[TEST MODE — LIFE-LINK CONTROLLED DRILL]',
+        testModeDesignation: 'TEST ONLY',
       },
       delivery: {
         attempted: Boolean(deliveryEvent),
