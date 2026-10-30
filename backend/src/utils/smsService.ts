@@ -17,6 +17,14 @@ export function isSmsProviderConfigured(): boolean {
   return Boolean(twilioClient && twilioNumber);
 }
 
+export function getCarrierProviderStatus() {
+  return {
+    isConfigured: isSmsProviderConfigured(),
+    provider: isSmsProviderConfigured() ? 'Twilio' : 'NONE',
+    fromNumber: twilioNumber ? `${twilioNumber.slice(0, 4)}****${twilioNumber.slice(-3)}` : null,
+  };
+}
+
 export interface SendSmsResult {
   recipient: string;
   success: boolean;
@@ -30,7 +38,7 @@ export interface SendSmsResult {
 export async function sendSMS(
   to: string,
   message: string,
-  options?: { simulateFailure?: boolean }
+  options?: { simulateFailure?: boolean; requireRealProvider?: boolean }
 ): Promise<SendSmsResult> {
   const cleanPhone = to.trim();
   if (!cleanPhone) {
@@ -50,6 +58,18 @@ export async function sendSMS(
       success: false,
       error: 'Carrier delivery failed: Network route unavailable',
       mock: true,
+      deliveryMode: 'FAILED',
+      deliveryStatus: 'FAILED',
+    };
+  }
+
+  // Strict check for test workflows: Never simulate successful delivery if live carrier is missing
+  if (options?.requireRealProvider && (!twilioClient || !twilioNumber)) {
+    return {
+      recipient: cleanPhone,
+      success: false,
+      error: 'Automatic carrier delivery unavailable: No SMS/WhatsApp carrier (Twilio) configured in backend environment. Mock simulation is prohibited during emergency test workflow.',
+      mock: false,
       deliveryMode: 'FAILED',
       deliveryStatus: 'FAILED',
     };

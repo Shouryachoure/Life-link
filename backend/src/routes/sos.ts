@@ -13,6 +13,7 @@ import {
 } from '../services/dispatchEngine';
 import { getIO } from '../socket';
 import { notifyTrustedContactsOfTripMilestone } from '../services/notificationService';
+import { sendSMS, isSmsProviderConfigured, getCarrierProviderStatus } from '../utils/smsService';
 
 const router = Router();
 
@@ -270,6 +271,449 @@ router.put('/service-area/:id', authenticate, authorize([Role.SUPER_ADMIN]), asy
     });
   } catch (error: any) {
     return res.status(500).json({ message: error.message || 'Failed to update service area' });
+  }
+});
+
+// -------------------------------------------------------------
+// CONTROLLED EMERGENCY WORKFLOW TEST (SANDBOX DRILL)
+// -------------------------------------------------------------
+const EMERGENCY_TEST_CONTACT_PHONE = process.env.EMERGENCY_TEST_CONTACT_PHONE || '+918669202393';
+const EMERGENCY_TEST_CONTACT_NAME = process.env.EMERGENCY_TEST_CONTACT_NAME || 'TEST CONTACT';
+
+/**
+ * 1. GET /api/v1/sos/test-workflow/config
+ * Retrieves test contact configuration, live carrier readiness, and sandbox constraints.
+ */
+router.get('/test-workflow/config', authenticate, async (_req: AuthRequest, res) => {
+  const carrier = getCarrierProviderStatus();
+  return res.json({
+    testContact: {
+      phone: EMERGENCY_TEST_CONTACT_PHONE,
+      name: EMERGENCY_TEST_CONTACT_NAME,
+      countryCode: '+91',
+      isTest: true,
+      label: 'TEST CONTACT',
+    },
+    carrier: {
+      isConfigured: carrier.isConfigured,
+      provider: carrier.provider,
+      fromNumber: carrier.fromNumber,
+      statusMessage: carrier.isConfigured
+        ? 'Live SMS carrier configured (Twilio)'
+        : 'Automated carrier delivery unavailable (no live Twilio account). Mock simulation is prohibited.',
+    },
+    safetyGuidelines: {
+      isDemoSandbox: true,
+      realAmbulanceDispatched: false,
+      hospitalErNotified: false,
+      officialEmergencyFallback: OFFICIAL_112_NOTICE,
+    },
+  });
+});
+
+/**
+ * 2. POST /api/v1/sos/test-workflow/initiate
+ * Initiates controlled test SOS: captures coordinates, creates persistent demo record in DB,
+ * generates unique test request ID, and prepares standardized test emergency notification payload.
+ */
+router.post('/test-workflow/initiate', authenticate, async (req: AuthRequest, res) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+
+  const {
+    pickupLat,
+    pickupLng,
+    gpsPermission = 'GRANTED',
+    pickupAddress,
+    notes,
+  } = req.body;
+
+  const lat = typeof pickupLat === 'number' ? pickupLat : parseFloat(pickupLat);
+  const lng = typeof pickupLng === 'number' ? pickupLng : parseFloat(pickupLng);
+
+  if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return res.status(400).json({
+      message: 'Invalid coordinate values. Valid GPS coordinates required for test workflow.',
+      code: 'INVALID_COORDINATES',
+    });
+  }
+
+  try {
+    // Create persistent EmergencyRequest record in database (isolated demo record)
+    const emergencyRequest = await prisma.emergencyRequest.create({
+      data: {
+        patientId: req.user.id,
+        pickupLat: lat,
+        pickupLng: lng,
+        pickupAddress: pickupAddress || 'Controlled SOS Test Drill — Nagpur Location',
+        category: 'EMERGENCY_TEST_WORKFLOW',
+        urgencyLevel: 'TEST_DRILL',
+        status: RequestStatus.PENDING,
+        isDemo: true, // Strictly isolated demo / test flag
+      },
+    });
+
+    const shortId = emergencyRequest.id.substring(0, 8).toUpperCase();
+    const testEmergencyId = `LL-TEST-${shortId}`;
+    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+    const requestTimestamp = new Date().toISOString();
+    const formattedIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+    // Standardized emergency notification payload
+    const notificationMessage = `[TEST MODE - LIFE-LINK DRILL] Controlled SOS Test Alert\nEmergency ID: ${testEmergencyId}\nPatient: ${req.user.name || 'Test User'}\nLocation: ${mapsUrl} (${lat.toFixed(5)}, ${lng.toFixed(5)})\nTime: ${formattedIST} IST\nTest Contact: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nNote: This is a controlled safety drill. No real dispatch triggered.`;
+
+    // Persist audit event
+    await prisma.emergencyEvent.create({
+      data: {
+        requestId: emergencyRequest.id,
+        eventType: 'TEST_SOS_INITIATED',
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        newState: 'INITIATED',
+        isDemo: true,
+        metadata: JSON.stringify({
+          testEmergencyId,
+          gpsPermission,
+          coordinates: { lat, lng },
+          mapsUrl,
+          requestTimestamp,
+          recipient: { name: EMERGENCY_TEST_CONTACT_NAME, phone: EMERGENCY_TEST_CONTACT_PHONE },
+          userNotes: notes || null,
+        }),
+      },
+    });
+
+    const carrier = getCarrierProviderStatus();
+
+    // Safe sanitized console log (no raw coordinates exposed)
+    console.log(`[LifeLink Test Workflow] SOS Test Initiated: ${testEmergencyId} for User ${req.user.id} (GPS Permission: ${gpsPermission})`);
+
+    return res.status(201).json({
+      success: true,
+      requestId: emergencyRequest.id,
+      testEmergencyId,
+      status: 'INITIATED',
+      gps: {
+        permission: gpsPermission,
+        lat,
+        lng,
+        mapsUrl,
+        capturedAt: requestTimestamp,
+      },
+      notificationPayload: {
+        testEmergencyId,
+        recipient: {
+          name: EMERGENCY_TEST_CONTACT_NAME,
+          phone: EMERGENCY_TEST_CONTACT_PHONE,
+        },
+        mapsUrl,
+        coordinates: { lat, lng },
+        messageBody: notificationMessage,
+        preparedAt: requestTimestamp,
+        formattedIST,
+        testModeDesignation: '[TEST MODE — LIFE-LINK CONTROLLED DRILL]',
+      },
+      carrier: {
+        isConfigured: carrier.isConfigured,
+        provider: carrier.provider,
+      },
+      timestamp: requestTimestamp,
+      officialEmergencyFallback: OFFICIAL_112_NOTICE,
+    });
+  } catch (error: any) {
+    console.error('[LifeLink Test Workflow ERROR] Failed to initiate test SOS:', error);
+    return res.status(500).json({
+      message: error.message || 'Failed to initiate controlled test SOS',
+      code: 'TEST_INITIATION_FAILED',
+    });
+  }
+});
+
+/**
+ * 3. POST /api/v1/sos/test-workflow/send-location
+ * Sends patient-approved test location coordinates to the test contact with explicit confirmation.
+ * Strict safety rule: If no SMS carrier is configured, reports delivery UNAVAILABLE and NEVER simulates success.
+ */
+router.post('/test-workflow/send-location', authenticate, async (req: AuthRequest, res) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { requestId, confirmedByUser } = req.body;
+
+  if (!requestId) {
+    return res.status(400).json({ message: 'requestId is required.', code: 'MISSING_REQUEST_ID' });
+  }
+
+  if (!confirmedByUser) {
+    return res.status(400).json({
+      message: 'Explicit user confirmation is required before dispatching emergency test location.',
+      code: 'CONFIRMATION_REQUIRED',
+    });
+  }
+
+  try {
+    const emergencyRequest = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+    });
+
+    if (!emergencyRequest || !emergencyRequest.isDemo) {
+      return res.status(404).json({
+        message: 'Active emergency test record not found or not in demo sandbox mode.',
+        code: 'TEST_REQUEST_NOT_FOUND',
+      });
+    }
+
+    const shortId = emergencyRequest.id.substring(0, 8).toUpperCase();
+    const testEmergencyId = `LL-TEST-${shortId}`;
+    const lat = emergencyRequest.pickupLat;
+    const lng = emergencyRequest.pickupLng;
+    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+    const formattedIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+    const messageBody = `[TEST MODE - LIFE-LINK DRILL] Controlled SOS Test Alert\nID: ${testEmergencyId}\nPatient: ${req.user.name || 'Test User'}\nLocation: ${mapsUrl}\nTime: ${formattedIST} IST\nRecipient: ${EMERGENCY_TEST_CONTACT_NAME} (${EMERGENCY_TEST_CONTACT_PHONE})\nNote: Controlled safety drill. No real emergency.`;
+
+    // Attempt live carrier delivery (requireRealProvider = true to forbid simulated mock success)
+    const smsResult = await sendSMS(EMERGENCY_TEST_CONTACT_PHONE, messageBody, {
+      requireRealProvider: true,
+    });
+
+    const isCarrierLive = isSmsProviderConfigured();
+    const cleanPhoneDigits = EMERGENCY_TEST_CONTACT_PHONE.replace(/\+/g, '').replace(/\D/g, '');
+    const smsDeepLink = `sms:${EMERGENCY_TEST_CONTACT_PHONE}?body=${encodeURIComponent(messageBody)}`;
+    const whatsappDeepLink = `https://wa.me/${cleanPhoneDigits}?text=${encodeURIComponent(messageBody)}`;
+
+    // Log the delivery attempt in audit trail
+    await prisma.emergencyEvent.create({
+      data: {
+        requestId: emergencyRequest.id,
+        eventType: 'TEST_LOCATION_DELIVERY_ATTEMPTED',
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        newState: smsResult.success ? 'DELIVERY_SUCCESS' : 'DELIVERY_FAILED',
+        isDemo: true,
+        metadata: JSON.stringify({
+          testEmergencyId,
+          recipient: EMERGENCY_TEST_CONTACT_PHONE,
+          deliveryMode: smsResult.deliveryMode,
+          deliveryStatus: smsResult.deliveryStatus,
+          success: smsResult.success,
+          error: smsResult.error || null,
+          carrierConfigured: isCarrierLive,
+          provider: isCarrierLive ? 'Twilio' : 'NONE',
+          timestamp: new Date().toISOString(),
+        }),
+      },
+    });
+
+    return res.json({
+      success: smsResult.success,
+      deliveryStatus: smsResult.deliveryStatus,
+      deliveryMode: smsResult.deliveryMode,
+      error: smsResult.error || null,
+      carrierConfigured: isCarrierLive,
+      carrierNotice: smsResult.success
+        ? 'Emergency notification accepted by live carrier provider for delivery.'
+        : 'Automated carrier delivery is unavailable because no live SMS provider (Twilio) is configured in backend environment. Simulation is prohibited.',
+      recipient: {
+        name: EMERGENCY_TEST_CONTACT_NAME,
+        phone: EMERGENCY_TEST_CONTACT_PHONE,
+      },
+      location: {
+        lat,
+        lng,
+        mapsUrl,
+      },
+      messageBody,
+      directLinks: {
+        sms: smsDeepLink,
+        whatsapp: whatsappDeepLink,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('[LifeLink Test Workflow ERROR] Location delivery error:', error);
+    return res.status(500).json({
+      message: error.message || 'Failed to execute test location delivery',
+      code: 'DELIVERY_EXECUTION_ERROR',
+    });
+  }
+});
+
+/**
+ * 4. POST /api/v1/sos/test-workflow/call-action
+ * Records initiation of the telephone dialer link action.
+ * Accurately logs that dialer was triggered without falsely claiming the call completed.
+ */
+router.post('/test-workflow/call-action', authenticate, async (req: AuthRequest, res) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { requestId } = req.body;
+
+  if (!requestId) {
+    return res.status(400).json({ message: 'requestId is required.', code: 'MISSING_REQUEST_ID' });
+  }
+
+  try {
+    const emergencyRequest = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+    });
+
+    if (!emergencyRequest || !emergencyRequest.isDemo) {
+      return res.status(404).json({
+        message: 'Active emergency test record not found or not in demo sandbox mode.',
+        code: 'TEST_REQUEST_NOT_FOUND',
+      });
+    }
+
+    const timestamp = new Date().toISOString();
+
+    // Persist dialer trigger event
+    await prisma.emergencyEvent.create({
+      data: {
+        requestId: emergencyRequest.id,
+        eventType: 'TEST_CALL_DIALER_INITIATED',
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        newState: 'DIALER_LAUNCHED',
+        isDemo: true,
+        metadata: JSON.stringify({
+          recipient: EMERGENCY_TEST_CONTACT_PHONE,
+          recipientName: EMERGENCY_TEST_CONTACT_NAME,
+          dialerUri: `tel:${EMERGENCY_TEST_CONTACT_PHONE}`,
+          status: 'DIALER_LAUNCHED',
+          note: 'Device telephone dialer launched via tel: protocol. Actual call completion depends on physical user placement on device.',
+          timestamp,
+        }),
+      },
+    });
+
+    return res.json({
+      success: true,
+      status: 'DIALER_LAUNCHED',
+      dialerUri: `tel:${EMERGENCY_TEST_CONTACT_PHONE}`,
+      recipient: {
+        name: EMERGENCY_TEST_CONTACT_NAME,
+        phone: EMERGENCY_TEST_CONTACT_PHONE,
+      },
+      disclaimer:
+        'Telephone dialer launched on device. Web security policies prevent automatic detection of physical call duration or connection.',
+      timestamp,
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      message: error.message || 'Failed to record call action',
+      code: 'CALL_ACTION_LOG_FAILED',
+    });
+  }
+});
+
+/**
+ * 5. GET /api/v1/sos/test-workflow/results/:requestId
+ * Retrieves complete audit summary and timeline for a given controlled test SOS drill.
+ */
+router.get('/test-workflow/results/:requestId', authenticate, async (req: AuthRequest, res) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { requestId } = req.params;
+
+  try {
+    const emergencyRequest = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+      include: {
+        events: {
+          orderBy: { timestamp: 'asc' },
+        },
+      },
+    });
+
+    if (!emergencyRequest || !emergencyRequest.isDemo) {
+      return res.status(404).json({
+        message: 'Controlled test record not found.',
+        code: 'TEST_RECORD_NOT_FOUND',
+      });
+    }
+
+    const shortId = emergencyRequest.id.substring(0, 8).toUpperCase();
+    const testEmergencyId = `LL-TEST-${shortId}`;
+    const lat = emergencyRequest.pickupLat;
+    const lng = emergencyRequest.pickupLng;
+    const mapsUrl = `https://maps.google.com/?q=${lat},${lng}`;
+
+    const initiateEvent = emergencyRequest.events.find((e) => e.eventType === 'TEST_SOS_INITIATED');
+    const deliveryEvent = emergencyRequest.events.find((e) => e.eventType === 'TEST_LOCATION_DELIVERY_ATTEMPTED');
+    const callEvent = emergencyRequest.events.find((e) => e.eventType === 'TEST_CALL_DIALER_INITIATED');
+
+    let initMeta: any = {};
+    if (initiateEvent?.metadata) {
+      try { initMeta = JSON.parse(initiateEvent.metadata); } catch {}
+    }
+
+    let deliveryMeta: any = {};
+    if (deliveryEvent?.metadata) {
+      try { deliveryMeta = JSON.parse(deliveryEvent.metadata); } catch {}
+    }
+
+    let callMeta: any = {};
+    if (callEvent?.metadata) {
+      try { callMeta = JSON.parse(callEvent.metadata); } catch {}
+    }
+
+    const carrier = getCarrierProviderStatus();
+
+    return res.json({
+      testEmergencyId,
+      requestId: emergencyRequest.id,
+      createdAt: emergencyRequest.createdAt,
+      status: emergencyRequest.status,
+      isDemo: true,
+      gps: {
+        lat,
+        lng,
+        mapsUrl,
+        permission: initMeta.gpsPermission || 'GRANTED',
+        capturedAt: initMeta.requestTimestamp || emergencyRequest.createdAt,
+      },
+      notification: {
+        recipient: {
+          name: EMERGENCY_TEST_CONTACT_NAME,
+          phone: EMERGENCY_TEST_CONTACT_PHONE,
+        },
+        mapsUrl,
+        preparedAt: initMeta.requestTimestamp || emergencyRequest.createdAt,
+        testModeDesignation: '[TEST MODE — LIFE-LINK CONTROLLED DRILL]',
+      },
+      delivery: {
+        attempted: Boolean(deliveryEvent),
+        success: deliveryMeta.success ?? false,
+        deliveryStatus: deliveryMeta.deliveryStatus || 'NOT_ATTEMPTED',
+        deliveryMode: deliveryMeta.deliveryMode || 'NONE',
+        carrierConfigured: carrier.isConfigured,
+        carrierProvider: carrier.provider,
+        error: deliveryMeta.error || null,
+        timestamp: deliveryMeta.timestamp || null,
+      },
+      calling: {
+        dialerLaunched: Boolean(callEvent),
+        status: callMeta.status || (callEvent ? 'DIALER_LAUNCHED' : 'NOT_INITIATED'),
+        timestamp: callMeta.timestamp || null,
+        recipient: EMERGENCY_TEST_CONTACT_PHONE,
+      },
+      timeline: emergencyRequest.events.map((e) => ({
+        id: e.id,
+        eventType: e.eventType,
+        newState: e.newState,
+        timestamp: e.timestamp,
+        metadata: e.metadata ? JSON.parse(e.metadata) : null,
+      })),
+      safetyStatus: {
+        zeroRealAmbulancesDispatched: true,
+        zeroHospitalErNotified: true,
+        nationalEmergencyFallback: OFFICIAL_112_NOTICE,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      message: error.message || 'Failed to retrieve test workflow results',
+      code: 'RESULTS_FETCH_FAILED',
+    });
   }
 });
 

@@ -20,6 +20,8 @@ export interface ValidatedConfig {
   twilioAuthToken?: string;
   twilioPhoneNumber?: string;
   googleClientId?: string;
+  emergencyTestContactPhone?: string;
+  emergencyTestContactName?: string;
 }
 
 const WEAK_DEV_SECRETS = new Set([
@@ -150,6 +152,8 @@ export function validateEnvironment(): ValidatedConfig {
     twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || undefined,
     twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER || undefined,
     googleClientId: process.env.GOOGLE_CLIENT_ID || undefined,
+    emergencyTestContactPhone: process.env.EMERGENCY_TEST_CONTACT_PHONE || '+918669202393',
+    emergencyTestContactName: process.env.EMERGENCY_TEST_CONTACT_NAME || 'TEST CONTACT',
   };
 
   // Safe startup log (all sensitive credentials strictly redacted)
@@ -189,4 +193,5 @@ function printSafeConfigSummary(config: ValidatedConfig) {
   console.log('[LifeLink Config] Super Admin 2FA TOTP:', config.superAdminTotpSecret ? '[ENABLED & CONFIGURED]' : '[NOT CONFIGURED]');
   console.log('[LifeLink Config] Gemini AI Provider:', config.geminiApiKey ? `[ENABLED: ${config.geminiModel}]` : '[DISABLED: LOCAL CLINICAL FALLBACK ACTIVE]');
   console.log('[LifeLink Config] Twilio SMS Provider:', config.twilioAccountSid ? '[ENABLED]' : '[DISABLED: LOCAL OUTBOX MOCK ACTIVE]');
+  console.log('[LifeLink Config] Controlled SOS Test Contact:', `${config.emergencyTestContactPhone} (${config.emergencyTestContactName})`);
 }
