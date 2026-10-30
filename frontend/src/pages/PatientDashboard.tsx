@@ -325,6 +325,12 @@ export const PatientDashboard: React.FC = () => {
 
   // Module A: Geolocation & Hospital / Ambulance Map handlers
   const requestPatientLocation = () => {
+    if (typeof window !== 'undefined' && window.isSecureContext === false && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      console.warn('Patient location blocked: Insecure context (HTTP over LAN). Localhost or HTTPS is required by browser security.');
+      setGeoPermission('DENIED');
+      fetchHospitalsForMap(lat, lng);
+      return;
+    }
     if (!navigator.geolocation) {
       setGeoPermission('DENIED');
       fetchHospitalsForMap(lat, lng);

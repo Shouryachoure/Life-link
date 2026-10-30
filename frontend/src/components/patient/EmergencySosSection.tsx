@@ -92,7 +92,13 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
   const EMERGENCY_TEST_PHONE = import.meta.env.VITE_EMERGENCY_TEST_CONTACT_PHONE || '+918669202393';
   const [isTestModeActive, setIsTestModeActive] = useState(true);
   const [testGpsLoading, setTestGpsLoading] = useState(false);
-  const [testGpsError, setTestGpsError] = useState<string | null>(null);
+  const [testGpsError, setTestGpsError] = useState<{
+    kind: 'INSECURE_CONTEXT' | 'PERMISSION_DENIED' | 'POSITION_UNAVAILABLE' | 'TIMEOUT' | 'UNKNOWN';
+    title: string;
+    message: string;
+    instruction: string;
+    contextHint?: string;
+  } | null>(null);
   const [testStep, setTestStep] = useState<'IDLE' | 'CALL_STEP'>('IDLE');
   const [testLocation, setTestLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [testCallInitiated, setTestCallInitiated] = useState(false);
@@ -394,20 +400,62 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
 
   // Simplified One-Button SOS Test Interaction (+918669202393)
   const executeSimpleSosTest = () => {
-    if (!navigator.geolocation) {
-      setTestGpsError('Geolocation is not supported by your browser or device.');
-      return;
-    }
-
     setTestGpsLoading(true);
     setTestGpsError(null);
     setTestCallInitiated(false);
 
+    // 1. Strict Secure Context Check (W3C Geolocation Mandate)
+    const isSecure = typeof window !== 'undefined' ? window.isSecureContext : true;
+    const isLocalhost =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+    if (!isSecure && !isLocalhost) {
+      setTestGpsLoading(false);
+      setTestGpsError({
+        kind: 'INSECURE_CONTEXT',
+        title: 'Insecure Context (HTTP LAN)',
+        message: `Browsers strictly block Geolocation on local network HTTP addresses (${window.location.host}). GPS access requires a secure HTTPS connection or localhost.`,
+        instruction: `• For PC testing: Open LifeLink on http://localhost:5173\n• For Mobile LAN testing: Run 'npm run dev:https' and open https://${window.location.hostname}:5173 on your phone, or run 'npm run tunnel' for a trusted HTTPS URL.`,
+        contextHint: `Current connection: ${window.location.protocol}//${window.location.host} (isSecureContext = false)`,
+      });
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setTestGpsLoading(false);
+      setTestGpsError({
+        kind: 'INSECURE_CONTEXT',
+        title: 'Geolocation API Unavailable',
+        message: 'The Geolocation API is not available in this browser environment. This typically occurs when accessing over an unencrypted HTTP local network address.',
+        instruction: `Connect using HTTPS (https://${window.location.hostname}:5173) or open http://localhost:5173 on your PC.`,
+      });
+      return;
+    }
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setTestGpsLoading(false);
-        const uLat = pos.coords.latitude;
-        const uLng = pos.coords.longitude;
+        const uLat = pos?.coords?.latitude;
+        const uLng = pos?.coords?.longitude;
+
+        // 2. Strict Verification: Ensure real, valid coordinates were acquired before generating link
+        if (
+          typeof uLat !== 'number' ||
+          typeof uLng !== 'number' ||
+          isNaN(uLat) ||
+          isNaN(uLng) ||
+          (uLat === 0 && uLng === 0)
+        ) {
+          setTestGpsError({
+            kind: 'POSITION_UNAVAILABLE',
+            title: 'Invalid Coordinates Captured',
+            message: 'Device returned empty or invalid GPS coordinates.',
+            instruction: 'Ensure GPS is enabled and tap Retry.',
+          });
+          return;
+        }
+
         onSetCoords(uLat, uLng);
         setTestLocation({ lat: uLat, lng: uLng });
 
@@ -440,15 +488,35 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
       },
       (err) => {
         setTestGpsLoading(false);
-        let errMsg = 'Failed to acquire GPS location.';
         if (err.code === err.PERMISSION_DENIED) {
-          errMsg = 'Location permission was denied. Please allow location access in your browser or phone settings to test SOS. LifeLink does not use fake coordinates.';
+          setTestGpsError({
+            kind: 'PERMISSION_DENIED',
+            title: 'Location Permission Denied',
+            message: 'Access to your device GPS location was denied by the browser or user.',
+            instruction: `• iPhone (Safari): Tap 'AA' in the address bar > Website Settings > Location > 'Allow'. (Or Settings > Privacy > Location Services > Safari)\n• Android (Chrome): Tap the tune/lock icon in address bar > Permissions > Location > 'Allow'.\n• PC: Click the tune/lock icon to the left of the URL > Location > 'Allow', then tap Retry below.`,
+          });
         } else if (err.code === err.POSITION_UNAVAILABLE) {
-          errMsg = 'GPS location unavailable. Please check your device location settings.';
+          setTestGpsError({
+            kind: 'POSITION_UNAVAILABLE',
+            title: 'GPS Position Unavailable',
+            message: 'Your device hardware or cellular network could not acquire a satellite/cellular position fix.',
+            instruction: 'Ensure Location Services / GPS is switched ON in your phone quick settings and that you are not in Airplane mode.',
+          });
         } else if (err.code === err.TIMEOUT) {
-          errMsg = 'GPS location request timed out. Please retry with a clearer sky view or Wi-Fi.';
+          setTestGpsError({
+            kind: 'TIMEOUT',
+            title: 'Location Request Timed Out',
+            message: 'GPS satellite fix could not be acquired within the 10-second window.',
+            instruction: 'Move closer to a window or outdoors with open sky, ensure Wi-Fi or cellular network is active, and tap Retry.',
+          });
+        } else {
+          setTestGpsError({
+            kind: 'UNKNOWN',
+            title: 'GPS Acquisition Error',
+            message: err.message || 'An unexpected error occurred while requesting device coordinates.',
+            instruction: 'Please ensure location permission is allowed and tap Retry.',
+          });
         }
-        setTestGpsError(errMsg);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
@@ -801,24 +869,56 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 </div>
               )}
 
-              {/* GPS Acquisition Error in Test Mode */}
+              {/* Categorized GPS Acquisition Error with Step-by-Step Guidance */}
               {testGpsError && testStep === 'IDLE' && (
-                <div className="mb-4 p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 space-y-1.5 text-left max-w-md mx-auto">
-                  <div className="flex items-center gap-2 font-bold text-amber-800 dark:text-amber-300">
-                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
-                    <span>GPS Location Required</span>
+                <div className="mb-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 space-y-2.5 text-left max-w-md mx-auto animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-bold text-amber-800 dark:text-amber-300">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                      <span>{testGpsError.title}</span>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-200/60 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 font-bold uppercase tracking-wider">
+                      {testGpsError.kind}
+                    </span>
                   </div>
-                  <p className="text-[11px] leading-relaxed">{testGpsError}</p>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
-                    LifeLink requires real coordinates and does not use simulated or fake locations.
+
+                  <p className="text-[11px] leading-relaxed text-slate-700 dark:text-slate-300 font-medium">
+                    {testGpsError.message}
                   </p>
-                  <button
-                    type="button"
-                    onClick={executeSimpleSosTest}
-                    className="mt-1 px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-3xs uppercase tracking-wider transition-colors cursor-pointer"
-                  >
-                    Retry Location Capture
-                  </button>
+
+                  <div className="p-3 rounded-xl bg-white/80 dark:bg-slate-900/70 border border-amber-200/80 dark:border-amber-900/60 text-[11px] text-slate-600 dark:text-slate-400 space-y-1.5">
+                    <strong className="block text-slate-800 dark:text-slate-200 text-3xs uppercase tracking-wider font-extrabold">
+                      How to fix & enable:
+                    </strong>
+                    <div className="whitespace-pre-line text-2xs leading-relaxed font-sans">
+                      {testGpsError.instruction}
+                    </div>
+                  </div>
+
+                  {testGpsError.contextHint && (
+                    <p className="text-[10px] text-amber-800/80 dark:text-amber-300/80 font-mono">
+                      {testGpsError.contextHint}
+                    </p>
+                  )}
+
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={executeSimpleSosTest}
+                      className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Retry Location Capture</span>
+                    </button>
+                    {testGpsError.kind === 'INSECURE_CONTEXT' && (
+                      <a
+                        href="http://localhost:5173"
+                        className="px-3 py-1.5 rounded-xl border border-amber-400 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-900 dark:text-amber-200 text-xs font-bold transition-colors"
+                      >
+                        Open Localhost
+                      </a>
+                    )}
+                  </div>
                 </div>
               )}
 
