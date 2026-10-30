@@ -86,31 +86,16 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
   onCancelTrip,
 }) => {
   // Navigation / Tab inside SOS
-  const [sosSubTab, setSosSubTab] = useState<'SOS' | 'AI_TRIAGE' | 'RADAR' | 'TEST_WORKFLOW'>('SOS');
+  const [sosSubTab, setSosSubTab] = useState<'SOS' | 'AI_TRIAGE' | 'RADAR'>('SOS');
 
-  // Controlled SOS Test Workflow States
+  // Simplified One-Button SOS Test Configuration (+918669202393)
   const EMERGENCY_TEST_PHONE = import.meta.env.VITE_EMERGENCY_TEST_CONTACT_PHONE || '+918669202393';
-  const EMERGENCY_TEST_NAME = import.meta.env.VITE_EMERGENCY_TEST_CONTACT_NAME || 'TEST CONTACT';
-
-  const [testConfig, setTestConfig] = useState<any>(null);
-  const [testLoading, setTestLoading] = useState(false);
-  const [testError, setTestError] = useState<string | null>(null);
-  const [testSuccessNotice, setTestSuccessNotice] = useState<string | null>(null);
-  const [testRequestId, setTestRequestId] = useState<string | null>(null);
-  const [testEmergencyId, setTestEmergencyId] = useState<string | null>(null);
-  const [testNotificationPayload, setTestNotificationPayload] = useState<any | null>(null);
-  const [testUserConfirmed, setTestUserConfirmed] = useState(false);
-  const [testDeliveryResult, setTestDeliveryResult] = useState<any | null>(null);
-  const [testDeliveryLoading, setTestDeliveryLoading] = useState(false);
-  const [testCallResult, setTestCallResult] = useState<any | null>(null);
-  const [testAuditResults, setTestAuditResults] = useState<any | null>(null);
-  const [testAuditLoading, setTestAuditLoading] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [isTestModeActive, setIsTestModeActive] = useState(false);
-  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
-  const [gpsTimestamp, setGpsTimestamp] = useState<string | null>(null);
-  const [gpsError, setGpsError] = useState<string | null>(null);
-  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+  const [isTestModeActive, setIsTestModeActive] = useState(true);
+  const [testGpsLoading, setTestGpsLoading] = useState(false);
+  const [testGpsError, setTestGpsError] = useState<string | null>(null);
+  const [testStep, setTestStep] = useState<'IDLE' | 'CALL_STEP'>('IDLE');
+  const [testLocation, setTestLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [testCallInitiated, setTestCallInitiated] = useState(false);
 
   // Ambulance Dispatch Configuration
   const [ambulanceTier, setAmbulanceTier] = useState<'BASIC_LIFE_SUPPORT' | 'ADVANCED_LIFE_SUPPORT' | 'OXYGEN_SUPPORT'>(
@@ -407,190 +392,80 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
     }
   };
 
-  // Controlled SOS Test Workflow Methods
-  useEffect(() => {
-    let isMounted = true;
-    const fetchConfig = async () => {
-      try {
-        const res = await apiFetch('/sos/test-workflow/config');
-        if (isMounted && res) {
-          setTestConfig(res);
-        }
-      } catch (err: any) {
-        console.warn('Could not load test workflow config:', err?.message);
-      }
-    };
-    if (sosSubTab === 'TEST_WORKFLOW' && !testConfig) {
-      fetchConfig();
-    }
-    return () => {
-      isMounted = false;
-    };
-  }, [sosSubTab, testConfig, apiFetch]);
-
-  useEffect(() => {
-    if (sosSubTab === 'TEST_WORKFLOW') {
-      setIsTestModeActive(true);
-    }
-  }, [sosSubTab]);
-
-  const captureTestGpsLocation = () => {
+  // Simplified One-Button SOS Test Interaction (+918669202393)
+  const executeSimpleSosTest = () => {
     if (!navigator.geolocation) {
-      setGpsError('Geolocation is not supported by your browser or device.');
+      setTestGpsError('Geolocation is not supported by your browser or device.');
       return;
     }
-    setGpsError(null);
-    onDetectLocation();
+
+    setTestGpsLoading(true);
+    setTestGpsError(null);
+    setTestCallInitiated(false);
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        setTestGpsLoading(false);
         const uLat = pos.coords.latitude;
         const uLng = pos.coords.longitude;
-        const acc = Math.round(pos.coords.accuracy);
-        const timeIso = new Date(pos.timestamp || Date.now()).toISOString();
-        setGpsAccuracy(acc);
-        setGpsTimestamp(timeIso);
         onSetCoords(uLat, uLng);
+        setTestLocation({ lat: uLat, lng: uLng });
+
+        const mapsUrl = `https://www.google.com/maps?q=${uLat},${uLng}`;
+        const message = `LIFELINK SOS TEST\n\nMy current location:\n${mapsUrl}\n\nThis is a test emergency alert.`;
+
+        // Direct WhatsApp format addressed to +918669202393
+        const waPhone = EMERGENCY_TEST_PHONE.replace(/[^0-9]/g, '');
+        const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`;
+
+        // Open WhatsApp in new window/app
+        window.open(waUrl, '_blank');
+
+        // Transition to Step 2 Call Action
+        setTestStep('CALL_STEP');
+
+        // Persist demo event in Supabase backend asynchronously
+        apiFetch('/sos/test-workflow/initiate', {
+          method: 'POST',
+          body: JSON.stringify({
+            pickupLat: uLat,
+            pickupLng: uLng,
+            gpsPermission: 'GRANTED',
+            gpsAccuracy: pos.coords.accuracy ? Math.round(pos.coords.accuracy) : null,
+            notes: 'Simplified one-button SOS test drill',
+          }),
+        }).catch(() => {
+          // Ignore background logging errors
+        });
       },
       (err) => {
-        let errMessage = 'Failed to acquire GPS location.';
+        setTestGpsLoading(false);
+        let errMsg = 'Failed to acquire GPS location.';
         if (err.code === err.PERMISSION_DENIED) {
-          errMessage = 'GPS permission denied. Please enable location permission in your browser or phone settings to acquire coordinates.';
+          errMsg = 'Location permission was denied. Please allow location access in your browser or phone settings to test SOS. LifeLink does not use fake coordinates.';
         } else if (err.code === err.POSITION_UNAVAILABLE) {
-          errMessage = 'GPS signal unavailable. Satellite or cellular fix could not be obtained at this time.';
+          errMsg = 'GPS location unavailable. Please check your device location settings.';
         } else if (err.code === err.TIMEOUT) {
-          errMessage = 'GPS location request timed out. Please retry with a clearer sky view or Wi-Fi connection.';
+          errMsg = 'GPS location request timed out. Please retry with a clearer sky view or Wi-Fi.';
         }
-        setGpsError(errMessage);
+        setTestGpsError(errMsg);
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   };
 
-  const handleShareNotification = async () => {
-    if (!testNotificationPayload?.messageBody) return;
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: 'LIFELINK SOS TEST',
-          text: testNotificationPayload.messageBody,
-        });
-        setShareFeedback('Shared successfully via device!');
-        setTimeout(() => setShareFeedback(null), 2500);
-      } catch (err: any) {
-        if (err.name !== 'AbortError') {
-          console.warn('Share failed:', err.message);
-        }
-      }
-    } else {
-      navigator.clipboard?.writeText(testNotificationPayload.messageBody);
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
-    }
+  const handleReopenWhatsApp = () => {
+    if (!testLocation) return;
+    const mapsUrl = `https://www.google.com/maps?q=${testLocation.lat},${testLocation.lng}`;
+    const message = `LIFELINK SOS TEST\n\nMy current location:\n${mapsUrl}\n\nThis is a test emergency alert.`;
+    const waPhone = EMERGENCY_TEST_PHONE.replace(/[^0-9]/g, '');
+    window.open(`https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`, '_blank');
   };
 
-  const handleInitiateTestSos = async () => {
-    setTestLoading(true);
-    setTestError(null);
-    setTestSuccessNotice(null);
-    try {
-      const payload = {
-        pickupLat: lat,
-        pickupLng: lng,
-        gpsPermission: geoPermission,
-        gpsAccuracy: gpsAccuracy,
-        pickupAddress: addressQuery || 'Nagpur Pilot Zone, Maharashtra',
-        notes: 'Controlled emergency workflow test drill',
-      };
-      const res = await apiFetch('/sos/test-workflow/initiate', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-
-      if (res?.success) {
-        setTestRequestId(res.requestId);
-        setTestEmergencyId(res.testEmergencyId);
-        setTestNotificationPayload(res.notificationPayload);
-        setTestSuccessNotice(`Test SOS record created successfully: ${res.testEmergencyId}`);
-        fetchTestAudit(res.requestId);
-      } else {
-        setTestError(res?.message || 'Failed to initiate test SOS');
-      }
-    } catch (err: any) {
-      setTestError(err?.message || 'Network error initiating test SOS');
-    } finally {
-      setTestLoading(false);
-    }
-  };
-
-  const handleCallTestContact = async () => {
-    if (!testRequestId) {
-      setTestError('Please initiate a test SOS record first before testing the call action.');
-      return;
-    }
-    try {
-      const res = await apiFetch('/sos/test-workflow/call-action', {
-        method: 'POST',
-        body: JSON.stringify({ requestId: testRequestId }),
-      });
-      setTestCallResult(res);
-      fetchTestAudit(testRequestId);
-    } catch (err: any) {
-      console.warn('Could not record call action in audit log:', err?.message);
-    }
-  };
-
-  const handleSendTestLocation = async () => {
-    if (!testRequestId) {
-      setTestError('Please initiate a test SOS record first.');
-      return;
-    }
-    if (!testUserConfirmed) {
-      setTestError('You must explicitly check the confirmation box before sending location coordinates.');
-      return;
-    }
-
-    setTestDeliveryLoading(true);
-    setTestError(null);
-    try {
-      const res = await apiFetch('/sos/test-workflow/send-location', {
-        method: 'POST',
-        body: JSON.stringify({
-          requestId: testRequestId,
-          confirmedByUser: true,
-        }),
-      });
-
-      setTestDeliveryResult(res);
-      fetchTestAudit(testRequestId);
-    } catch (err: any) {
-      setTestError(err?.message || 'Failed to dispatch test location notification');
-    } finally {
-      setTestDeliveryLoading(false);
-    }
-  };
-
-  const fetchTestAudit = async (reqId: string) => {
-    setTestAuditLoading(true);
-    try {
-      const res = await apiFetch(`/sos/test-workflow/results/${reqId}`);
-      setTestAuditResults(res);
-    } catch (err: any) {
-      console.warn('Failed to fetch test results audit:', err?.message);
-    } finally {
-      setTestAuditLoading(false);
-    }
-  };
-
-  const handleResetTestDrill = () => {
-    setTestRequestId(null);
-    setTestEmergencyId(null);
-    setTestNotificationPayload(null);
-    setTestUserConfirmed(false);
-    setTestDeliveryResult(null);
-    setTestCallResult(null);
-    setTestAuditResults(null);
-    setTestError(null);
-    setTestSuccessNotice(null);
+  const resetTestState = () => {
+    setTestStep('IDLE');
+    setTestGpsError(null);
+    setTestCallInitiated(false);
   };
 
   // Medical profile summary
@@ -627,54 +502,6 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
           <span>Call 112</span>
         </a>
       </div>
-
-      {/* PROMINENT TEST MODE ACTIVE INDICATOR */}
-      {(isTestModeActive || sosSubTab === 'TEST_WORKFLOW') && (
-        <div className="p-4 sm:p-5 rounded-2xl bg-amber-500/15 border-2 border-amber-500/60 text-amber-900 dark:text-amber-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-lg shadow-amber-500/10">
-          <div className="flex items-start sm:items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white font-mono font-black text-sm flex items-center justify-center shrink-0 shadow-md shadow-amber-500/30">
-              <FlaskConical className="w-5 h-5 text-white animate-pulse" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-black uppercase tracking-wider text-amber-800 dark:text-amber-300">
-                  ⚠️ TEST MODE ACTIVE
-                </span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-900 dark:text-amber-200 border border-amber-500/40 font-mono">
-                  Authorized Recipient: {EMERGENCY_TEST_PHONE}
-                </span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-900 text-white font-mono">
-                  SANDBOX ISOLATED
-                </span>
-              </div>
-              <p className="text-xs text-amber-800/90 dark:text-amber-300/90 mt-1 leading-relaxed">
-                LifeLink is currently operating in controlled test mode. Real ambulance operators and hospital emergency rooms will <strong>NEVER</strong> be notified.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
-            <button
-              type="button"
-              onClick={() => setSosSubTab('TEST_WORKFLOW')}
-              className="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer flex items-center justify-center gap-1.5"
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              <span>Test Console</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setIsTestModeActive(false);
-                if (sosSubTab === 'TEST_WORKFLOW') setSosSubTab('SOS');
-              }}
-              className="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl border border-amber-400 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-900 dark:text-amber-200 font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer text-center"
-            >
-              Exit Test Mode
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* 2. EMERGENCY ASSISTANCE HEADER & REAL-TIME LOCATION BAR */}
       <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5">
@@ -782,7 +609,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
           </div>
         )}
 
-        {/* Sub-navigation tabs & Test Mode toggle */}
+        {/* Sub-navigation tabs: SOS Action vs AI Symptom Assistance vs Live Radar Map */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4">
           <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
             <button
@@ -795,7 +622,7 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               }`}
             >
               <ShieldAlert className="w-3.5 h-3.5" />
-              <span>Emergency SOS Dispatch</span>
+              <span>Emergency SOS</span>
             </button>
 
             <button
@@ -823,43 +650,24 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
               <Radio className="w-3.5 h-3.5" />
               <span>Live Hospital & Ambulance Map</span>
             </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setSosSubTab('TEST_WORKFLOW');
-                setIsTestModeActive(true);
-              }}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
-                sosSubTab === 'TEST_WORKFLOW'
-                  ? 'bg-amber-600 text-white shadow-sm shadow-amber-600/30 ring-2 ring-amber-500/50'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-            >
-              <FlaskConical className="w-3.5 h-3.5 text-amber-300" />
-              <span>Controlled SOS Drill</span>
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                Test (+918669202393)
-              </span>
-            </button>
           </div>
 
-          {/* Explicit Test Mode Toggle Switch Button */}
+          {/* Minimal Test Mode Toggle Switch */}
           <button
             type="button"
             onClick={() => {
-              const next = !isTestModeActive;
-              setIsTestModeActive(next);
+              setIsTestModeActive(!isTestModeActive);
+              resetTestState();
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center gap-2 shrink-0 select-none border ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 border select-none ${
               isTestModeActive
-                ? 'bg-amber-500/20 text-amber-900 dark:text-amber-200 border-amber-500 ring-2 ring-amber-500/30'
+                ? 'bg-amber-500/15 text-amber-900 dark:text-amber-200 border-amber-400/80 shadow-xs'
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700'
             }`}
-            title="Toggle between Live Dispatch and Controlled Test Mode"
+            title="Toggle between Live Emergency Dispatch and Safe Test Mode"
           >
-            <FlaskConical className={`w-3.5 h-3.5 ${isTestModeActive ? 'text-amber-600 animate-pulse' : 'text-slate-400'}`} />
-            <span>🧪 Test Mode: <strong className={isTestModeActive ? 'text-amber-700 dark:text-amber-300' : 'text-slate-500'}>{isTestModeActive ? 'ON' : 'OFF'}</strong></span>
+            <FlaskConical className={`w-3.5 h-3.5 ${isTestModeActive ? 'text-amber-600' : 'text-slate-400'}`} />
+            <span>Test Mode (+918669202393): <strong>{isTestModeActive ? 'ON' : 'OFF'}</strong></span>
           </button>
         </div>
       </div>
@@ -972,33 +780,6 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
           {/* LEFT COLUMN: PRIMARY SOS DISPATCH CONTROL (7 COLS) */}
           <div className="lg:col-span-7 p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 flex flex-col justify-between space-y-6">
             <div>
-              {/* Quick Launch Banner for Controlled Test Drill */}
-              <div className="mb-4 p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400">
-                    <FlaskConical className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                      <span>Controlled SOS Drill</span>
-                      <span className="text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-700 dark:text-amber-300 font-extrabold rounded">
-                        TEST CONTACT +918669202393
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      Test GPS coordinates, dialer action, and location delivery safely without real dispatches.
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setSosSubTab('TEST_WORKFLOW')}
-                  className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition-all shrink-0 cursor-pointer shadow-xs"
-                >
-                  Test Drill
-                </button>
-              </div>
-
               <div className="flex items-center justify-between mb-4">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
                   Primary Emergency Trigger
@@ -1020,84 +801,163 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
                 </div>
               )}
 
+              {/* GPS Acquisition Error in Test Mode */}
+              {testGpsError && testStep === 'IDLE' && (
+                <div className="mb-4 p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 space-y-1.5 text-left max-w-md mx-auto">
+                  <div className="flex items-center gap-2 font-bold text-amber-800 dark:text-amber-300">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                    <span>GPS Location Required</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">{testGpsError}</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                    LifeLink requires real coordinates and does not use simulated or fake locations.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={executeSimpleSosTest}
+                    className="mt-1 px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-3xs uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    Retry Location Capture
+                  </button>
+                </div>
+              )}
+
               {/* STATE 1: IDLE */}
               {dispatchPhase === 'IDLE' && (
                 <div className="text-center py-4 space-y-6">
-                  {isTestModeActive ? (
-                    <div>
-                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-extrabold mb-2">
-                        <FlaskConical className="w-3.5 h-3.5 animate-pulse text-amber-600" />
-                        <span>CONTROLLED TEST MODE (DRILL)</span>
+                  {testStep === 'CALL_STEP' && testLocation ? (
+                    /* Step 2: Compact Call Action after WhatsApp Trigger */
+                    <div className="max-w-md mx-auto p-5 rounded-2xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 shadow-sm space-y-4 animate-in fade-in duration-200 text-left">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                          <FlaskConical className="w-3.5 h-3.5 text-amber-500" />
+                          <span>Emergency SOS Test</span>
+                        </span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 font-bold">
+                          {EMERGENCY_TEST_PHONE}
+                        </span>
                       </div>
-                      <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
-                        Tap to Run Safe Test SOS Drill
-                      </h2>
-                      <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
-                        Authorized test recipient: <strong className="text-slate-800 dark:text-slate-200">{EMERGENCY_TEST_PHONE}</strong>. Captures GPS, generates a persistent test record in Supabase, and prepares notification with zero ambulance dispatches.
-                      </p>
+
+                      {/* Step 1 Status */}
+                      <div className="flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold text-slate-900 dark:text-slate-100">
+                            Step 1: WhatsApp opened with location link
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            Prepared message addressed to {EMERGENCY_TEST_PHONE}. Review and send the message in WhatsApp.
+                          </p>
+                          <span className="inline-block mt-1 font-mono text-[10px] text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/50 px-2 py-0.5 rounded border border-teal-200 dark:border-teal-800">
+                            GPS: {testLocation.lat.toFixed(5)}, {testLocation.lng.toFixed(5)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Step 2 Call Action */}
+                      <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                            Step 2: Initiate Phone Call
+                          </span>
+                          <span className="text-[10px] text-slate-400">Explicit confirmation</span>
+                        </div>
+                        <a
+                          href={`tel:${EMERGENCY_TEST_PHONE}`}
+                          onClick={() => setTestCallInitiated(true)}
+                          className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+                        >
+                          <PhoneCall className="w-4 h-4" />
+                          <span>Call Test Number ({EMERGENCY_TEST_PHONE})</span>
+                        </a>
+                        <p className="text-[10px] text-slate-400 text-center">
+                          Clicking opens device dialer. LifeLink never places automatic phone calls.
+                        </p>
+
+                        {testCallInitiated && (
+                          <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-xs flex items-center gap-2">
+                            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                            <span>Dialer opened on your device. Complete call in phone app.</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Footer Controls */}
+                      <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between text-xs">
+                        <button
+                          type="button"
+                          onClick={handleReopenWhatsApp}
+                          className="text-teal-600 dark:text-teal-400 font-semibold hover:underline cursor-pointer flex items-center gap-1"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>Re-open WhatsApp</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resetTestState}
+                          className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs cursor-pointer"
+                        >
+                          Done / Reset
+                        </button>
+                      </div>
                     </div>
                   ) : (
+                    /* Standard Main SOS Button Interface */
                     <div>
-                      <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
-                        Tap to Initiate Code Red Dispatch
-                      </h2>
-                      <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
-                        Transmits high-priority emergency alert with your GPS coordinates and medical record to the nearest ambulance and hospital ER trauma team.
-                      </p>
+                      {testGpsLoading ? (
+                        <div className="py-6 space-y-3">
+                          <HeartbeatLoader size="large" strokeColor="#e11d48" />
+                          <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                            Acquiring high-accuracy GPS coordinates...
+                          </p>
+                          <span className="text-[11px] text-slate-400">
+                            Please approve browser location permission if prompted.
+                          </span>
+                        </div>
+                      ) : (
+                        <>
+                          <div>
+                            <h2 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-slate-100">
+                              {isTestModeActive ? 'Emergency SOS (Test Mode)' : 'Tap to Initiate Code Red Dispatch'}
+                            </h2>
+                            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
+                              {isTestModeActive
+                                ? `Captures GPS, opens WhatsApp with location link to ${EMERGENCY_TEST_PHONE}, and offers phone call. Real ambulance operators are never notified.`
+                                : 'Transmits high-priority emergency alert with your GPS coordinates and medical record to the nearest ambulance and hospital ER trauma team.'}
+                            </p>
+                          </div>
+
+                          {/* Existing Main SOS Button */}
+                          <div className="flex justify-center py-2">
+                            <button
+                              type="button"
+                              onClick={isTestModeActive ? executeSimpleSosTest : startSosCountdown}
+                              disabled={testGpsLoading}
+                              className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-rose-700 via-rose-600 to-red-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-rose-600/35 hover:shadow-rose-600/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
+                              aria-label={isTestModeActive ? 'Activate Emergency SOS Test' : 'Activate Emergency SOS'}
+                            >
+                              {/* Subtle pulse ring */}
+                              <span className="absolute inset-0 rounded-full bg-rose-500/20 animate-ping pointer-events-none"></span>
+
+                              <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
+                                <ShieldAlert className="w-8 h-8 text-white" />
+                              </div>
+                              <span className="text-3xl font-black tracking-widest uppercase font-mono">SOS</span>
+                              <span className="text-[10px] uppercase font-bold tracking-wider text-rose-100 mt-1">
+                                {isTestModeActive ? 'Test Mode (+918669202393)' : 'Tap for Help'}
+                              </span>
+                            </button>
+                          </div>
+
+                          <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                            {isTestModeActive
+                              ? 'Safe Test Mode Active: Opens WhatsApp & offers dialer link. Zero real ambulance dispatches.'
+                              : 'Includes a 10-second cancellable safety window before live broadcast.'}
+                          </p>
+                        </>
+                      )}
                     </div>
                   )}
-
-                  {/* Refined SOS Button - Switches styling and handler based on Test Mode */}
-                  <div className="flex justify-center py-2">
-                    {isTestModeActive ? (
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await handleInitiateTestSos();
-                          setSosSubTab('TEST_WORKFLOW');
-                        }}
-                        disabled={testLoading}
-                        className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-amber-600 via-amber-500 to-yellow-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-amber-500/35 hover:shadow-amber-500/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
-                        aria-label="Activate Controlled Test SOS Drill"
-                      >
-                        <span className="absolute inset-0 rounded-full bg-amber-500/20 animate-ping pointer-events-none"></span>
-
-                        <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
-                          <FlaskConical className="w-8 h-8 text-white" />
-                        </div>
-                        <span className="text-xl sm:text-2xl font-black tracking-wider uppercase font-mono text-center">
-                          TEST SOS (DRILL)
-                        </span>
-                        <span className="text-[9px] uppercase font-black tracking-wider text-amber-950 mt-1 bg-white/80 px-2 py-0.5 rounded-full shadow-xs">
-                          Safe Test Mode • 0 Paramedics Notified
-                        </span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={startSosCountdown}
-                        className="group relative w-48 h-48 sm:w-52 sm:h-52 rounded-full bg-gradient-to-tr from-rose-700 via-rose-600 to-red-500 text-white flex flex-col items-center justify-center shadow-2xl shadow-rose-600/35 hover:shadow-rose-600/50 hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border-4 border-white/20 select-none"
-                        aria-label="Activate Emergency SOS"
-                      >
-                        {/* Subtle pulse ring */}
-                        <span className="absolute inset-0 rounded-full bg-rose-500/20 animate-ping pointer-events-none"></span>
-
-                        <div className="w-14 h-14 rounded-2xl bg-white/15 flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
-                          <ShieldAlert className="w-8 h-8 text-white" />
-                        </div>
-                        <span className="text-3xl font-black tracking-widest uppercase font-mono">SOS</span>
-                        <span className="text-[10px] uppercase font-bold tracking-wider text-rose-100 mt-1">
-                          Tap for Help
-                        </span>
-                      </button>
-                    )}
-                  </div>
-
-                  <p className="text-[11px] text-slate-400 dark:text-slate-500">
-                    {isTestModeActive
-                      ? 'Safe Sandbox Drill: Will create isolated record & open verification dashboard.'
-                      : 'Includes a 10-second cancellable safety window before live broadcast.'}
-                  </p>
                 </div>
               )}
 
@@ -1435,665 +1295,8 @@ export const EmergencySosSection: React.FC<EmergencySosSectionProps> = ({
         </div>
       )}
 
-      {/* 5.5 SUB-TAB 'TEST_WORKFLOW': CONTROLLED SOS CALL & LOCATION DELIVERY TEST */}
-      {!activeTrip && sosSubTab === 'TEST_WORKFLOW' && (
-        <div className="space-y-6 animate-in fade-in duration-300">
-          {/* Header Card */}
-          <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-100 dark:border-slate-800">
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="p-2 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400">
-                    <FlaskConical className="w-5 h-5" />
-                  </div>
-                  <span className="text-xs font-black uppercase tracking-wider text-amber-600 dark:text-amber-400">
-                    Controlled Emergency Workflow Test
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase tracking-wide bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
-                    Sandbox Drill
-                  </span>
-                </div>
-                <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-slate-100">
-                  SOS Call & Location Delivery Verification
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
-                  Run an end-to-end controlled emergency workflow test with designated test contact{' '}
-                  <strong className="text-slate-800 dark:text-slate-200">{EMERGENCY_TEST_NAME} ({EMERGENCY_TEST_PHONE})</strong>.
-                  Verifies GPS capture, persistent Supabase recording, dialer linking, and carrier delivery without notifying real hospital ERs or ambulance fleets.
-                </p>
-              </div>
-
-              {testRequestId && (
-                <button
-                  type="button"
-                  onClick={handleResetTestDrill}
-                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors cursor-pointer flex items-center gap-2 shrink-0 self-start md:self-center"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Start New Drill</span>
-                </button>
-              )}
-            </div>
-
-            {/* Test Contact & Safety Badges */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-6">
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60">
-                <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">Designated Test Contact</span>
-                <span className="text-sm font-extrabold text-slate-900 dark:text-slate-100 flex items-center gap-1.5 mt-0.5">
-                  <Phone className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
-                  {EMERGENCY_TEST_PHONE}
-                </span>
-                <span className="text-3xs text-slate-500 dark:text-slate-400 font-mono mt-0.5 block">
-                  Config: {EMERGENCY_TEST_NAME} (Isolated)
-                </span>
-              </div>
-
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60">
-                <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">Carrier Provider Status</span>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className={`w-2 h-2 rounded-full ${testConfig?.carrier?.isConfigured ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-                  <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                    {testConfig?.carrier?.isConfigured ? 'Twilio Live Carrier' : 'No Carrier (Local Mode)'}
-                  </span>
-                </div>
-                <span className="text-3xs text-slate-500 dark:text-slate-400 mt-0.5 block">
-                  {testConfig?.carrier?.isConfigured ? 'Live SMS delivery enabled' : 'Automatic SMS disabled. Device SIM fallback ready.'}
-                </span>
-              </div>
-
-              <div className="p-3.5 rounded-2xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200/80 dark:border-rose-900/50">
-                <span className="text-3xs font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">Emergency Safeguard</span>
-                <div className="flex items-center justify-between mt-0.5">
-                  <span className="text-xs font-extrabold text-rose-700 dark:text-rose-300">
-                    Real Emergency? Dial 112
-                  </span>
-                  <a
-                    href="tel:112"
-                    className="px-2 py-0.5 rounded-lg bg-rose-600 text-white font-mono text-xs font-black shadow-xs hover:bg-rose-700 transition-colors"
-                  >
-                    112
-                  </a>
-                </div>
-                <span className="text-3xs text-rose-600/80 dark:text-rose-400/80 mt-0.5 block">
-                  Never use test mode during genuine life-threatening events.
-                </span>
-              </div>
-            </div>
-
-            {/* Error or Notice Alert */}
-            {testError && (
-              <div className="mt-4 p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 flex items-start gap-2.5 text-xs text-rose-700 dark:text-rose-300">
-                <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                <div>
-                  <strong className="block font-bold">Action Notice:</strong>
-                  {testError}
-                </div>
-              </div>
-            )}
-            {testSuccessNotice && (
-              <div className="mt-4 p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 flex items-start gap-2.5 text-xs text-emerald-700 dark:text-emerald-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                <div className="font-semibold">{testSuccessNotice}</div>
-              </div>
-            )}
-          </div>
-
-          {/* 4-Step Interactive Testing Pipeline */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-            {/* STEP 1: GPS PERMISSION & LOCATION CAPTURE */}
-            <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-black flex items-center justify-center">
-                    1
-                  </span>
-                  <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-                    GPS Coordinates & Accuracy
-                  </h3>
-                </div>
-                <span className={`px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase ${
-                  geoPermission === 'GRANTED'
-                    ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
-                    : geoPermission === 'DENIED'
-                    ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
-                    : 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
-                }`}>
-                  Permission: {geoPermission}
-                </span>
-              </div>
-
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Captures high-accuracy device coordinates via browser Geolocation API with explicit accuracy radius.
-              </p>
-
-              {gpsError && (
-                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="block font-bold">GPS Acquisition Notice:</strong>
-                    <p className="mt-0.5 leading-relaxed">{gpsError}</p>
-                  </div>
-                </div>
-              )}
-
-              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400 font-semibold">Captured Latitude:</span>
-                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{lat ? lat.toFixed(5) : '—'}</span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400 font-semibold">Captured Longitude:</span>
-                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{lng ? lng.toFixed(5) : '—'}</span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400 font-semibold">Accuracy:</span>
-                  <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                    {gpsAccuracy !== null ? `±${gpsAccuracy} m` : 'Standard browser accuracy'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400 font-semibold">Capture Timestamp:</span>
-                  <span className="font-mono text-slate-700 dark:text-slate-300 text-3xs">
-                    {gpsTimestamp ? new Date(gpsTimestamp).toLocaleTimeString() + ' IST' : 'Live browser acquisition'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400 font-semibold">Detected Zone:</span>
-                  <span className="font-semibold text-slate-700 dark:text-slate-300 truncate max-w-[200px]">
-                    {addressQuery || 'Nagpur Pilot Zone, Maharashtra'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={captureTestGpsLocation}
-                  disabled={locLoading}
-                  className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${locLoading ? 'animate-spin text-teal-600' : ''}`} />
-                  <span>{locLoading ? 'Locating...' : 'Refresh GPS'}</span>
-                </button>
-
-                <a
-                  href={`https://www.google.com/maps?q=${lat},${lng}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold transition-colors flex items-center gap-1.5 ml-auto"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Preview in Maps</span>
-                </a>
-              </div>
-            </div>
-
-            {/* STEP 2: INITIATE TEST SOS & PREPARE PAYLOAD */}
-            <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-black flex items-center justify-center">
-                    2
-                  </span>
-                  <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-                    Create Test Emergency Record
-                  </h3>
-                </div>
-                {testEmergencyId ? (
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" />
-                    <span>{testEmergencyId}</span>
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-slate-100 dark:bg-slate-800 text-slate-500">
-                    Not Initiated
-                  </span>
-                )}
-              </div>
-
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Creates a persistent EmergencyRequest in Supabase PostgreSQL (flagged with <code className="font-mono text-3xs bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded">isDemo: true</code>) and generates a standardized notification payload.
-              </p>
-
-              {!testEmergencyId ? (
-                <button
-                  type="button"
-                  onClick={handleInitiateTestSos}
-                  disabled={testLoading}
-                  className="w-full py-3.5 rounded-2xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-amber-600/30 transition-all cursor-pointer flex items-center justify-center gap-2"
-                >
-                  {testLoading ? (
-                    <>
-                      <HeartbeatLoader size="small" strokeColor="#ffffff" />
-                      <span>Creating Persistent Test Record...</span>
-                    </>
-                  ) : (
-                    <>
-                      <FlaskConical className="w-4 h-4" />
-                      <span>Initiate Controlled Test SOS</span>
-                    </>
-                  )}
-                </button>
-              ) : (
-                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400 font-semibold">Emergency Test ID:</span>
-                    <span className="font-mono font-black text-amber-600 dark:text-amber-400">{testEmergencyId}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400 font-semibold">Database Persistence:</span>
-                    <span className="font-bold text-emerald-600 dark:text-emerald-400 text-3xs uppercase">
-                      ✓ Supabase PostgreSQL Verified
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-400 font-semibold">Driver Dispatch Status:</span>
-                    <span className="font-bold text-slate-600 dark:text-slate-300 text-3xs uppercase">
-                      Isolated (0 real dispatches)
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* STEP 3: CALLING TEST CONTACT ACTION */}
-            <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-black flex items-center justify-center">
-                    3
-                  </span>
-                  <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-                    Call Test Contact Action
-                  </h3>
-                </div>
-                {testCallResult ? (
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300">
-                    Dialer Triggered
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-slate-100 dark:bg-slate-800 text-slate-500">
-                    Ready to Dial
-                  </span>
-                )}
-              </div>
-
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Launches device phone dialer with <strong className="text-slate-800 dark:text-slate-200">{EMERGENCY_TEST_PHONE}</strong> via the <code className="font-mono text-3xs bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded">tel:</code> protocol.
-              </p>
-
-              <div className="p-3.5 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200/60 dark:border-blue-900/40 text-xs text-blue-900 dark:text-blue-200 space-y-1">
-                <div className="font-bold flex items-center gap-1.5">
-                  <Info className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                  <span>Browser Limitation Notice</span>
-                </div>
-                <p className="text-2xs text-blue-800/80 dark:text-blue-300/80 leading-relaxed">
-                  Web security prevents browsers from detecting physical call completion or duration. Clicking below logs a verified <strong className="font-mono">DIALER_LAUNCHED</strong> audit event without false claims.
-                </p>
-              </div>
-
-              <a
-                href={`tel:${EMERGENCY_TEST_PHONE}`}
-                onClick={handleCallTestContact}
-                className={`w-full py-3.5 rounded-2xl text-white font-bold text-xs sm:text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                  testRequestId
-                    ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/30'
-                    : 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed pointer-events-none opacity-60'
-                }`}
-              >
-                <PhoneCall className="w-4 h-4" />
-                <span>Call Test Number ({EMERGENCY_TEST_PHONE})</span>
-              </a>
-
-              {testCallResult && (
-                <div className="text-2xs text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                  <Check className="w-3.5 h-3.5" />
-                  <span>Dialer trigger logged in database audit trail at {new Date(testCallResult.timestamp).toLocaleTimeString()}</span>
-                </div>
-              )}
-            </div>
-
-            {/* STEP 4: SEND TEST LOCATION NOTIFICATION */}
-            <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-black flex items-center justify-center">
-                    4
-                  </span>
-                  <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">
-                    Send Test Location Notification
-                  </h3>
-                </div>
-                {testDeliveryResult ? (
-                  <span className={`px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase ${
-                    testDeliveryResult.success
-                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
-                      : 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
-                  }`}>
-                    {testDeliveryResult.success ? 'Carrier Delivered' : 'Integration Required'}
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-full text-3xs font-extrabold uppercase bg-slate-100 dark:bg-slate-800 text-slate-500">
-                    Confirmation Required
-                  </span>
-                )}
-              </div>
-
-              {/* Exact Location & Recipient Preview before sending */}
-              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 font-semibold">Target Recipient:</span>
-                  <span className="font-bold text-slate-800 dark:text-slate-200">{EMERGENCY_TEST_NAME} ({EMERGENCY_TEST_PHONE})</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 font-semibold">Exact Coordinates:</span>
-                  <span className="font-mono text-slate-700 dark:text-slate-300">{lat.toFixed(5)}, {lng.toFixed(5)}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400 font-semibold">Google Maps URL:</span>
-                  <a
-                    href={`https://www.google.com/maps?q=${lat},${lng}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-mono text-teal-600 dark:text-teal-400 hover:underline truncate max-w-[200px]"
-                  >
-                    https://www.google.com/maps?q={lat.toFixed(4)},{lng.toFixed(4)}
-                  </a>
-                </div>
-              </div>
-
-              {/* Explicit User Confirmation Checkbox */}
-              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/40 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={testUserConfirmed}
-                  onChange={(e) => setTestUserConfirmed(e.target.checked)}
-                  className="mt-0.5 rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
-                />
-                <span className="text-xs text-slate-700 dark:text-slate-300 font-medium">
-                  I explicitly confirm sending this emergency test location notification to <strong>{EMERGENCY_TEST_NAME} ({EMERGENCY_TEST_PHONE})</strong>.
-                </span>
-              </label>
-
-              {/* Send Button */}
-              <button
-                type="button"
-                onClick={handleSendTestLocation}
-                disabled={!testRequestId || !testUserConfirmed || testDeliveryLoading}
-                className={`w-full py-3.5 rounded-2xl text-white font-bold text-xs sm:text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                  testRequestId && testUserConfirmed && !testDeliveryLoading
-                    ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/30'
-                    : 'bg-slate-300 dark:bg-slate-700 cursor-not-allowed opacity-60'
-                }`}
-              >
-                {testDeliveryLoading ? (
-                  <>
-                    <HeartbeatLoader size="small" strokeColor="#ffffff" />
-                    <span>Attempting Carrier Delivery...</span>
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-4 h-4" />
-                    <span>Send Test Location via Carrier</span>
-                  </>
-                )}
-              </button>
-
-              {/* Share and Copy Actions if notification payload is ready */}
-              {testNotificationPayload && (
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={handleShareNotification}
-                    className="flex-1 py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 text-teal-600" />
-                    <span>Share via Device</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(testNotificationPayload.messageBody);
-                      setCopiedLink(true);
-                      setTimeout(() => setCopiedLink(false), 2000);
-                    }}
-                    className="flex-1 py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedLink ? 'Copied' : 'Copy Message'}</span>
-                  </button>
-                </div>
-              )}
-              {shareFeedback && (
-                <p className="text-2xs text-emerald-600 dark:text-emerald-400 font-semibold text-center">{shareFeedback}</p>
-              )}
-
-              {/* Carrier Delivery Feedback & Mobile Deep Links */}
-              {testDeliveryResult && (
-                <div className="space-y-3 pt-2">
-                  {!testDeliveryResult.success && (
-                    <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200 space-y-2">
-                      <div className="font-bold flex items-center gap-1.5">
-                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                        <span>Automatic Carrier Delivery Requires Integration</span>
-                      </div>
-                      <p className="text-2xs text-amber-800/80 dark:text-amber-300/80 leading-relaxed">
-                        Automatic SMS delivery requires live Twilio credentials. Delivery is <strong className="underline">not simulated</strong>. You can dispatch manually using device messaging below:
-                      </p>
-
-                      <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {testDeliveryResult.directLinks?.sms && (
-                          <a
-                            href={testDeliveryResult.directLinks.sms}
-                            className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-2xs transition-colors flex items-center gap-1 shadow-xs"
-                          >
-                            <MessageSquare className="w-3 h-3" />
-                            <span>Open Device SMS App</span>
-                          </a>
-                        )}
-                        {testDeliveryResult.directLinks?.whatsapp && (
-                          <a
-                            href={testDeliveryResult.directLinks.whatsapp}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-2xs transition-colors flex items-center gap-1 shadow-xs"
-                          >
-                            <ExternalLink className="w-3 h-3" />
-                            <span>Open in WhatsApp</span>
-                          </a>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {testDeliveryResult.success && (
-                    <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-xs text-emerald-800 dark:text-emerald-200">
-                      <div className="font-bold flex items-center gap-1.5">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span>Carrier Dispatched Successfully</span>
-                      </div>
-                      <p className="text-2xs text-emerald-700/80 dark:text-emerald-300/80 mt-1">
-                        Twilio SID: <span className="font-mono">{testDeliveryResult.messageId || 'Active'}</span>
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* STEP 5: TEST NOTIFICATION PAYLOAD & RESULTS AUDIT CARD */}
-          {testEmergencyId && (
-            <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-teal-600 dark:text-teal-400" />
-                    <h3 className="font-bold text-base text-slate-900 dark:text-slate-100">
-                      Controlled Test Audit Report & Delivery Results
-                    </h3>
-                  </div>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Real-time verification log persisted in database for Emergency ID <strong className="font-mono text-slate-700 dark:text-slate-300">{testEmergencyId}</strong>
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => testRequestId && fetchTestAudit(testRequestId)}
-                  disabled={testAuditLoading}
-                  className="px-3.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors cursor-pointer flex items-center gap-1.5 self-start sm:self-auto"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${testAuditLoading ? 'animate-spin text-teal-600' : ''}`} />
-                  <span>Refresh Audit Log</span>
-                </button>
-              </div>
-
-              {/* Standardized Emergency Notification Payload Preview */}
-              {testNotificationPayload && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
-                      Standardized Notification Payload
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(testNotificationPayload.messageBody);
-                        setCopiedLink(true);
-                        setTimeout(() => setCopiedLink(false), 2000);
-                      }}
-                      className="text-2xs font-semibold text-teal-600 dark:text-teal-400 hover:underline flex items-center gap-1 cursor-pointer"
-                    >
-                      {copiedLink ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-                      <span>{copiedLink ? 'Copied!' : 'Copy Text'}</span>
-                    </button>
-                  </div>
-
-                  <div className="p-4 rounded-2xl bg-slate-900 text-slate-100 font-mono text-xs whitespace-pre-wrap leading-relaxed border border-slate-800 shadow-inner">
-                    {testNotificationPayload.messageBody}
-                  </div>
-                </div>
-              )}
-
-              {/* 6 Core Verification Parameters */}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* 1. SOS test record created */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">1. SOS Test Record Created</span>
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Record Active ({testEmergencyId})</span>
-                  </div>
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 font-mono block">
-                    Mode: isDemo=true (Isolated Sandbox)
-                  </span>
-                </div>
-
-                {/* 2. GPS captured */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">2. GPS Captured</span>
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
-                    <MapPin className="w-3.5 h-3.5 text-rose-500" />
-                    <span>{lat.toFixed(5)}, {lng.toFixed(5)}</span>
-                  </div>
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate font-mono">
-                    Accuracy: {gpsAccuracy !== null ? `±${gpsAccuracy} m` : 'Standard'} • {geoPermission}
-                  </span>
-                </div>
-
-                {/* 3. Notification prepared */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">3. Notification Prepared</span>
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-teal-600 dark:text-teal-400">
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Payload Ready ({testRequestId})</span>
-                  </div>
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    Maps URL: https://www.google.com/maps?q=...
-                  </span>
-                </div>
-
-                {/* 4. Notification actually delivered, if provider integration exists */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">4. Notification Actually Delivered</span>
-                  {testDeliveryResult ? (
-                    <div className="flex items-center gap-1.5 text-xs font-bold">
-                      {testDeliveryResult.success ? (
-                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Delivered via Live Carrier
-                        </span>
-                      ) : (
-                        <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
-                          <AlertTriangle className="w-3.5 h-3.5" /> Integration Required (Not Simulated)
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-xs text-slate-400 font-semibold">Awaiting Send Trigger</span>
-                  )}
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    Provider: {testConfig?.carrier?.isConfigured ? 'Twilio Active' : 'Unconfigured • Fallbacks Ready'}
-                  </span>
-                </div>
-
-                {/* 5. Call action initiated */}
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700/60 space-y-1">
-                  <span className="text-3xs font-bold text-slate-400 uppercase tracking-wider block">5. Call Action Initiated</span>
-                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
-                    <PhoneForwarded className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>{testCallResult ? 'DIALER_LAUNCHED' : 'Ready for User Tap'}</span>
-                  </div>
-                  <span className="text-3xs text-slate-500 dark:text-slate-400 block truncate">
-                    {testCallResult ? 'Dialer trigger logged in database' : `Target: ${EMERGENCY_TEST_PHONE}`}
-                  </span>
-                </div>
-
-                {/* 6. Ambulance dispatch: NOT ATTEMPTED — TEST MODE */}
-                <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-800/60 space-y-1">
-                  <span className="text-3xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">6. Ambulance Dispatch</span>
-                  <div className="flex items-center gap-1.5 text-xs font-black text-emerald-700 dark:text-emerald-300">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>NOT ATTEMPTED — TEST MODE</span>
-                  </div>
-                  <span className="text-3xs text-emerald-600/80 dark:text-emerald-400/80 block">
-                    Zero real vehicles dispatched • Zero fake positions
-                  </span>
-                </div>
-              </div>
-
-              {/* Chronological Audit Event Trail */}
-              {testAuditResults?.timeline && testAuditResults.timeline.length > 0 && (
-                <div className="pt-2">
-                  <h4 className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider mb-3">
-                    Database Event Trail (Supabase PostgreSQL EmergencyEvent Table)
-                  </h4>
-                  <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200/60 dark:border-slate-800 rounded-2xl overflow-hidden">
-                    {testAuditResults.timeline.map((item: any, idx: number) => (
-                      <div key={idx} className="p-3 bg-slate-50/50 dark:bg-slate-800/40 flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-3xs font-bold px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
-                            {item.eventType}
-                          </span>
-                          <span className="text-slate-600 dark:text-slate-400 font-medium">
-                            State: <strong className="text-slate-800 dark:text-slate-200">{item.newState || 'LOGGED'}</strong>
-                          </span>
-                        </div>
-                        <span className="font-mono text-3xs text-slate-400">
-                          {new Date(item.timestamp).toLocaleTimeString()} IST
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 6. SUB-TAB 'RADAR' OR BOTTOM EMERGENCY NETWORK RADAR SECTION */}
-      {(!activeTrip && sosSubTab !== 'TEST_WORKFLOW' || sosSubTab === 'RADAR') && (
+      {/* 6. VERIFIED HOSPITAL NETWORK & AMBULANCE RADAR */}
+      {!activeTrip && (
         <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-950/5 space-y-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
             <div>
